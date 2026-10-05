@@ -1,17 +1,16 @@
 //! Shell-facing argument, output, and terminal-restoration protocol.
 
 use anyhow::{Context, bail};
-use crossterm::cursor::SetCursorStyle;
-use crossterm::event::DisableBracketedPaste;
-use crossterm::execute;
-use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
+use crossterm::terminal::disable_raw_mode;
+use crate::terminal::TtyOutput;
 use std::ffi::OsString;
 use std::io::{self, Write};
-use std::sync::Once;
+use std::sync::{Mutex, Once};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static TERMINAL_ACTIVE: AtomicBool = AtomicBool::new(false);
 static PANIC_HOOK: Once = Once::new();
+static RESTORE_TTY: Mutex<Option<TtyOutput>> = Mutex::new(None);
 
 /// Parse the optional `--query "$BUFFER"` argument. Defaults to an empty buffer
 /// when omitted, so Silk can be launched without a pre-filled command.
@@ -72,23 +71,22 @@ pub fn install_panic_hook() {
     });
 }
 
-pub(crate) fn terminal_started() {
+pub(crate) fn terminal_started(tty: TtyOutput) {
+    *RESTORE_TTY.lock().unwrap_or_else(|error| error.into_inner()) = Some(tty);
     TERMINAL_ACTIVE.store(true, Ordering::SeqCst);
 }
 
 pub(crate) fn terminal_restored() {
     TERMINAL_ACTIVE.store(false, Ordering::SeqCst);
+    RESTORE_TTY.lock().unwrap_or_else(|error| error.into_inner()).take();
 }
 
 pub(crate) fn emergency_restore_terminal() {
     if TERMINAL_ACTIVE.swap(false, Ordering::SeqCst) {
         let _ = disable_raw_mode();
-        let _ = execute!(
-            io::stderr(),
-            SetCursorStyle::DefaultUserShape,
-            DisableBracketedPaste,
-            LeaveAlternateScreen
-        );
+        if let Some(mut tty) = RESTORE_TTY.lock().unwrap_or_else(|error| error.into_inner()).take() {
+            let _ = crate::terminal::restore_output(&mut tty);
+        }
     }
 }
 

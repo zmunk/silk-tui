@@ -10,15 +10,15 @@ use crate::{protocol, ui};
 use anyhow::Context;
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEvent, KeyEventKind,
+    self, EnableBracketedPaste, Event, KeyEvent, KeyEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    EnterAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
-use std::io::{Stderr, stderr};
+use crate::terminal::{TtyBackend, clone_tty, open_tty, restore_output};
+use std::io::IsTerminal;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 use tui_textarea::CursorMove;
@@ -45,7 +45,7 @@ enum NormalPending {
     Replace,
 }
 
-type AppTerminal = Terminal<CrosstermBackend<Stderr>>;
+type AppTerminal = Terminal<TtyBackend>;
 
 /// Top-level application state (§4).
 pub struct AppState {
@@ -604,7 +604,7 @@ impl App {
                 crate::keymap::VimMode::Insert => SetCursorStyle::SteadyBar,
                 crate::keymap::VimMode::Normal => SetCursorStyle::SteadyBlock,
             };
-            execute!(terminal.backend_mut(), cursor_style)
+            execute!(terminal.backend_mut().output(), cursor_style)
                 .context("failed to update terminal cursor style")?;
             self.cursor_mode = Some(state.editor.vim_mode);
         }
@@ -612,14 +612,19 @@ impl App {
     }
 
     fn start_terminal(&mut self) -> anyhow::Result<()> {
+        // Crossterm reads events/raw-mode state from stdin when it is a TTY.
+        // Never replace stdin with the shell-protocol pipe.
+        anyhow::ensure!(std::io::stdin().is_terminal(), "stdin must be connected to the terminal");
+        let mut output = open_tty().context("failed to open interactive /dev/tty")?;
+        let rescue = clone_tty(&output).context("failed to clone interactive TTY")?;
+        let rendering = clone_tty(&output).context("failed to clone TTY rendering handle")?;
         enable_raw_mode().context("failed to enable raw mode")?;
-        protocol::terminal_started();
-        let mut output = stderr();
+        protocol::terminal_started(rescue);
         if let Err(error) = execute!(output, EnterAlternateScreen, EnableBracketedPaste) {
             protocol::emergency_restore_terminal();
             return Err(error).context("failed to enter alternate screen");
         }
-        match Terminal::new(CrosstermBackend::new(output)) {
+        match Terminal::new(TtyBackend::new(output, rendering)) {
             Ok(mut terminal) => {
                 if let Err(error) = terminal.clear() {
                     protocol::emergency_restore_terminal();
@@ -638,21 +643,21 @@ impl App {
     fn restore_terminal(&mut self) -> anyhow::Result<()> {
         let raw_result = disable_raw_mode().context("failed to disable raw mode");
         let screen_result = if let Some(mut terminal) = self.terminal.take() {
-            let leave = execute!(
-                terminal.backend_mut(),
-                SetCursorStyle::DefaultUserShape,
-                DisableBracketedPaste,
-                LeaveAlternateScreen
-            )
-            .context("failed to leave alternate screen");
+            let leave = restore_output(terminal.backend_mut().output())
+                .context("failed to restore terminal output");
             let cursor = terminal.show_cursor().context("failed to show cursor");
             self.cursor_mode = None;
             leave.and(cursor)
         } else {
             Ok(())
         };
-        protocol::terminal_restored();
-        raw_result.and(screen_result)
+        let result = raw_result.and(screen_result);
+        if result.is_ok() {
+            protocol::terminal_restored();
+        } else {
+            protocol::emergency_restore_terminal();
+        }
+        result
     }
 }
 

@@ -6,6 +6,7 @@ mod evaluator;
 mod keymap;
 mod output;
 mod protocol;
+mod terminal;
 mod ui;
 
 fn main() {
