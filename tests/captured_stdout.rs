@@ -24,20 +24,47 @@ fn termios(tty: &File) -> libc::termios {
 fn captured_session(keys: &[u8], code: i32, command: Option<&str>, invalid_args: bool) {
     let mut master_fd = -1;
     let mut slave_fd = -1;
-    let size = libc::winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
-    assert_eq!(unsafe {
-        libc::openpty(&mut master_fd, &mut slave_fd, std::ptr::null_mut(), std::ptr::null(), &size)
-    }, 0);
+    let size = libc::winsize {
+        ws_row: 24,
+        ws_col: 80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master_fd,
+                &mut slave_fd,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &size,
+            )
+        },
+        0
+    );
     let mut master = unsafe { File::from_raw_fd(master_fd) };
     let slave = unsafe { File::from_raw_fd(slave_fd) };
     let original = termios(&slave);
-    assert_ne!(unsafe { libc::fcntl(master_fd, libc::F_SETFD, libc::FD_CLOEXEC) }, -1);
-    assert_ne!(unsafe { libc::fcntl(slave_fd, libc::F_SETFD, libc::FD_CLOEXEC) }, -1);
-    assert_ne!(unsafe { libc::fcntl(master_fd, libc::F_SETFL, libc::O_NONBLOCK) }, -1);
+    assert_ne!(
+        unsafe { libc::fcntl(master_fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+        -1
+    );
+    assert_ne!(
+        unsafe { libc::fcntl(slave_fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+        -1
+    );
+    assert_ne!(
+        unsafe { libc::fcntl(master_fd, libc::F_SETFL, libc::O_NONBLOCK) },
+        -1
+    );
 
     let mut process = Command::new(env!("CARGO_BIN_EXE_silk"));
     process
-        .args(if invalid_args { vec!["--invalid"] } else { vec!["--query", "printf silk-test"] })
+        .args(if invalid_args {
+            vec!["--invalid"]
+        } else {
+            vec!["--query", "printf silk-test"]
+        })
         // Isolate tests from user configuration; no config is read under /dev/null.
         .env("XDG_CONFIG_HOME", "/dev/null")
         .env("TERM", "xterm-256color")
@@ -65,34 +92,73 @@ fn captured_session(keys: &[u8], code: i32, command: Option<&str>, invalid_args:
         }
         // A cursor-style update occurs after the first complete frame. No
         // cursor report should ever be requested (and thus none can enter ZLE).
-        assert!(!screen.windows(4).any(|bytes| bytes == b"\x1b[6n"), "unexpected cursor query");
+        assert!(
+            !screen.windows(4).any(|bytes| bytes == b"\x1b[6n"),
+            "unexpected cursor query"
+        );
         if !sent && screen.windows(2).any(|bytes| bytes == b" q") {
             master.write_all(keys).unwrap();
             sent = true;
         }
-        if let Some(status) = child.0.try_wait().unwrap() { break status; }
-        assert!(Instant::now() < deadline, "Silk did not render/exit: {:?}", String::from_utf8_lossy(&screen));
+        if let Some(status) = child.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Silk did not render/exit: {:?}",
+            String::from_utf8_lossy(&screen)
+        );
         std::thread::sleep(Duration::from_millis(10));
     };
     let mut stdout = Vec::new();
-    child.0.stdout.take().unwrap().read_to_end(&mut stdout).unwrap();
+    child
+        .0
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_end(&mut stdout)
+        .unwrap();
     let mut stderr = String::new();
-    child.0.stderr.take().unwrap().read_to_string(&mut stderr).unwrap();
+    child
+        .0
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
     assert_eq!(status.code(), Some(code), "{stderr}");
-    assert_eq!(stdout, command.unwrap_or("").as_bytes(), "protocol stdout polluted");
+    assert_eq!(
+        stdout,
+        command.unwrap_or("").as_bytes(),
+        "protocol stdout polluted"
+    );
     assert!(!stdout.contains(&0x1b));
     if invalid_args {
-        assert!(stderr.contains("unexpected argument"), "diagnostics were lost: {stderr}");
+        assert!(
+            stderr.contains("unexpected argument"),
+            "diagnostics were lost: {stderr}"
+        );
     } else {
-        assert!(stderr.is_empty(), "TUI or diagnostics unexpectedly on stderr: {stderr}");
+        assert!(
+            stderr.is_empty(),
+            "TUI or diagnostics unexpectedly on stderr: {stderr}"
+        );
         // Collect final teardown bytes written just before process exit.
         let mut bytes = [0; 8192];
         while let Ok(n) = master.read(&mut bytes) {
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             screen.extend_from_slice(&bytes[..n]);
         }
-        assert!(screen.windows(8).any(|bytes| bytes == b"\x1b[?1049l"), "alternate screen not restored");
-        assert!(screen.windows(6).any(|bytes| bytes == b"\x1b[?25h"), "cursor not restored");
+        assert!(
+            screen.windows(8).any(|bytes| bytes == b"\x1b[?1049l"),
+            "alternate screen not restored"
+        );
+        assert!(
+            screen.windows(6).any(|bytes| bytes == b"\x1b[?25h"),
+            "cursor not restored"
+        );
         assert!(!screen.windows(4).any(|bytes| bytes == b"\x1b[6n"));
     }
     let restored = termios(&slave);
@@ -104,11 +170,19 @@ fn captured_session(keys: &[u8], code: i32, command: Option<&str>, invalid_args:
     // Probe the restored canonical input queue, as the shell would. Only our
     // newline may be present; any leftover cursor response would precede it.
     master.write_all(b"\n").unwrap();
-    let mut ready = libc::pollfd { fd: slave_fd, events: libc::POLLIN, revents: 0 };
+    let mut ready = libc::pollfd {
+        fd: slave_fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
     assert_eq!(unsafe { libc::poll(&mut ready, 1, 1000) }, 1);
     let mut remaining = [0; 128];
     let n = (&slave).read(&mut remaining).unwrap();
-    assert_eq!(&remaining[..n], b"\n", "terminal input leaked back to the shell");
+    assert_eq!(
+        &remaining[..n],
+        b"\n",
+        "terminal input leaked back to the shell"
+    );
 }
 
 #[test]

@@ -87,7 +87,12 @@ pub fn stdout_inner_size(
     editor_line_count: usize,
     max_editor_lines: usize,
 ) -> Rect {
-    let layout = calculate_layout(area, error_pane_visible, editor_line_count, max_editor_lines);
+    let layout = calculate_layout(
+        area,
+        error_pane_visible,
+        editor_line_count,
+        max_editor_lines,
+    );
     stdout_block().inner(layout.stdout)
 }
 
@@ -135,7 +140,10 @@ fn render_stdout(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(output_title(status, state.animation_started.elapsed().as_millis()))
+        .title(output_title(
+            status,
+            state.animation_started.elapsed().as_millis(),
+        ))
         .border_style(Style::default().fg(status_color(status)));
     let paragraph = Paragraph::new(text)
         .style(text_style)
@@ -343,11 +351,18 @@ mod tests {
 
     #[test]
     fn output_header_only_animates_while_running() {
-        for status in [EvaluationStatus::Empty, EvaluationStatus::Current, EvaluationStatus::Stale] {
+        for status in [
+            EvaluationStatus::Empty,
+            EvaluationStatus::Current,
+            EvaluationStatus::Stale,
+        ] {
             assert_eq!(output_title(status, 0), " OUTPUT ");
             assert_eq!(output_title(status, 80), " OUTPUT ");
         }
-        assert_ne!(output_title(EvaluationStatus::Running, 0), output_title(EvaluationStatus::Running, 80));
+        assert_ne!(
+            output_title(EvaluationStatus::Running, 0),
+            output_title(EvaluationStatus::Running, 80)
+        );
     }
 
     #[test]

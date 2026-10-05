@@ -344,7 +344,10 @@ fn find_target_column(editor: &EditorState, motion: FindMotion, target: char) ->
             if column < 2 {
                 return None;
             }
-            (0..column - 1).rev().find(|&i| chars[i] == target).map(|i| i + 1)
+            (0..column - 1)
+                .rev()
+                .find(|&i| chars[i] == target)
+                .map(|i| i + 1)
         }
     }
 }
@@ -714,9 +717,17 @@ mod tests {
         assert_eq!(editor1.textarea.cursor(), (0, 5));
 
         let mut editor2 = editor("echo one two");
-        assert!(apply_find_motion(&mut editor2, FindMotion::ForwardTill, 'o'));
+        assert!(apply_find_motion(
+            &mut editor2,
+            FindMotion::ForwardTill,
+            'o'
+        ));
         assert_eq!(editor2.textarea.cursor(), (0, 2));
-        assert!(!apply_find_motion(&mut editor2, FindMotion::ForwardTill, 'z'));
+        assert!(!apply_find_motion(
+            &mut editor2,
+            FindMotion::ForwardTill,
+            'z'
+        ));
     }
 
     #[test]

@@ -6,18 +6,14 @@ use crate::editor::{EditorEffect, EditorState, FindMotion, apply_vim_action};
 use crate::evaluator::Evaluator;
 use crate::keymap::{GlobalAction, KeyChord, KeyCode, VimAction, key_chord_from_crossterm};
 use crate::output::{EvaluationResult, EvaluationStatus, OutputState};
+use crate::terminal::{TtyBackend, clone_tty, open_tty, restore_output};
 use crate::{protocol, ui};
 use anyhow::Context;
 use crossterm::cursor::SetCursorStyle;
-use crossterm::event::{
-    self, EnableBracketedPaste, Event, KeyEvent, KeyEventKind,
-};
+use crossterm::event::{self, EnableBracketedPaste, Event, KeyEvent, KeyEventKind};
 use crossterm::execute;
-use crossterm::terminal::{
-    EnterAlternateScreen, disable_raw_mode, enable_raw_mode,
-};
+use crossterm::terminal::{EnterAlternateScreen, disable_raw_mode, enable_raw_mode};
 use ratatui::Terminal;
-use crate::terminal::{TtyBackend, clone_tty, open_tty, restore_output};
 use std::io::IsTerminal;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -40,7 +36,10 @@ enum NormalPending {
     Operator,
     /// `f`/`F`/`t`/`T` pressed, awaiting the target character. `change` is `true`
     /// when this follows `c` (e.g. `cf`, `ct`).
-    Find { motion: FindMotion, change: bool },
+    Find {
+        motion: FindMotion,
+        change: bool,
+    },
     /// `r` pressed, awaiting the replacement character.
     Replace,
 }
@@ -317,16 +316,17 @@ impl App {
                             if change {
                                 crate::editor::change_over_find(&mut self.state.editor, motion, ch);
                             } else {
-                                crate::editor::apply_find_motion(&mut self.state.editor, motion, ch);
+                                crate::editor::apply_find_motion(
+                                    &mut self.state.editor,
+                                    motion,
+                                    ch,
+                                );
                             }
                         }
                     }
                 }
                 NormalPending::Operator => {
-                    if key.code == KeyCode::Char('c')
-                        && !key.modifiers.ctrl
-                        && !key.modifiers.alt
-                    {
+                    if key.code == KeyCode::Char('c') && !key.modifiers.ctrl && !key.modifiers.alt {
                         apply_vim_action(VimAction::ChangeWholeLine, &mut self.state.editor);
                     } else if let Some(motion) = find_motion_for_key(key) {
                         self.normal_pending = NormalPending::Find {
@@ -622,7 +622,10 @@ impl App {
     fn start_terminal(&mut self) -> anyhow::Result<()> {
         // Crossterm reads events/raw-mode state from stdin when it is a TTY.
         // Never replace stdin with the shell-protocol pipe.
-        anyhow::ensure!(std::io::stdin().is_terminal(), "stdin must be connected to the terminal");
+        anyhow::ensure!(
+            std::io::stdin().is_terminal(),
+            "stdin must be connected to the terminal"
+        );
         let mut output = open_tty().context("failed to open interactive /dev/tty")?;
         let rescue = clone_tty(&output).context("failed to clone interactive TTY")?;
         let rendering = clone_tty(&output).context("failed to clone TTY rendering handle")?;
@@ -701,8 +704,12 @@ fn apply_text_input(editor: &mut EditorState, event: KeyEvent) {
         // Enter means "execute" (handled as a global action); Ctrl-J is the
         // dedicated "insert a literal newline" key instead.
         CrosstermKey::Char('j')
-            if event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
-                && !event.modifiers.contains(crossterm::event::KeyModifiers::ALT) =>
+            if event
+                .modifiers
+                .contains(crossterm::event::KeyModifiers::CONTROL)
+                && !event
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::ALT) =>
         {
             editor.textarea.insert_newline();
         }
@@ -893,10 +900,25 @@ mod tests {
     #[test]
     fn normal_mode_new_editing_keys_are_wired() {
         for (text, keys, expected, mode) in [
-            ("first\nsecond", "O", "\nfirst\nsecond", crate::keymap::VimMode::Insert),
-            ("first\nsecond", "J", "first second", crate::keymap::VimMode::Normal),
+            (
+                "first\nsecond",
+                "O",
+                "\nfirst\nsecond",
+                crate::keymap::VimMode::Insert,
+            ),
+            (
+                "first\nsecond",
+                "J",
+                "first second",
+                crate::keymap::VimMode::Normal,
+            ),
             ("cat", "cl", "at", crate::keymap::VimMode::Insert),
-            ("first\n\nthird", "jdd", "first\nthird", crate::keymap::VimMode::Normal),
+            (
+                "first\n\nthird",
+                "jdd",
+                "first\nthird",
+                crate::keymap::VimMode::Normal,
+            ),
         ] {
             let mut app = app();
             app.state.editor.set_text(text);
@@ -905,7 +927,8 @@ mod tests {
                 app.handle_key(KeyEvent::new(
                     crossterm::event::KeyCode::Char(character),
                     crossterm::event::KeyModifiers::NONE,
-                )).unwrap();
+                ))
+                .unwrap();
             }
             assert_eq!(app.state.editor.text(), expected);
             assert_eq!(app.state.editor.vim_mode, mode);
