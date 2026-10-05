@@ -12,6 +12,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 const NO_OUTPUT: &str = "(no output)";
+/// Minimum number of visible columns kept between the cursor and the right edge
+/// of the editor pane, as long as the line has that much text left to show.
+const LOOKAHEAD_COLUMNS: usize = 5;
 
 /// Pure layout geometry for the Silk UI: stdout pane, optional stderr pane,
 /// the editor, and the footer.
@@ -24,14 +27,25 @@ pub struct UiLayout {
 }
 
 /// Compute the exact `Rect`s used by [`render`], as a pure function of the
-/// terminal `area` and whether the stderr pane is visible. Shared by the
-/// renderer and by preview-size calculation so both stay in lockstep.
-pub fn calculate_layout(area: Rect, error_pane_visible: bool) -> UiLayout {
+/// terminal `area`, whether the stderr pane is visible, and how many rows the
+/// editor needs. Shared by the renderer and by preview-size calculation so
+/// both stay in lockstep.
+///
+/// `editor_line_count` is the number of logical lines in the command buffer
+/// (always at least 1); the editor pane grows to fit them up to
+/// `max_editor_lines`, then scrolls instead of growing further.
+pub fn calculate_layout(
+    area: Rect,
+    error_pane_visible: bool,
+    editor_line_count: usize,
+    max_editor_lines: usize,
+) -> UiLayout {
+    let editor_rows = editor_visible_height(editor_line_count, max_editor_lines) as u16 + 2;
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),
-            Constraint::Length(3),
+            Constraint::Length(editor_rows),
             Constraint::Length(2),
         ])
         .split(area);
@@ -57,12 +71,23 @@ pub fn calculate_layout(area: Rect, error_pane_visible: bool) -> UiLayout {
     }
 }
 
+/// Number of visible editor rows for a buffer with `line_count` lines, capped
+/// at `max_lines` (both clamped to at least 1).
+fn editor_visible_height(line_count: usize, max_lines: usize) -> usize {
+    line_count.max(1).min(max_lines.max(1))
+}
+
 /// Compute the usable interior of the stdout pane, using the same
 /// `Block::inner()` semantics as the `Borders::ALL` block rendered in
 /// [`render_stdout`]. This is the exact size passed to the evaluator as
 /// `COLUMNS` / `LINES` and as the PTY `ws_col` / `ws_row`.
-pub fn stdout_inner_size(area: Rect, error_pane_visible: bool) -> Rect {
-    let layout = calculate_layout(area, error_pane_visible);
+pub fn stdout_inner_size(
+    area: Rect,
+    error_pane_visible: bool,
+    editor_line_count: usize,
+    max_editor_lines: usize,
+) -> Rect {
+    let layout = calculate_layout(area, error_pane_visible, editor_line_count, max_editor_lines);
     stdout_block().inner(layout.stdout)
 }
 
@@ -71,8 +96,14 @@ fn stdout_block() -> Block<'static> {
 }
 
 /// Render the complete UI as a pure view of `AppState`.
-pub fn render(frame: &mut Frame<'_>, state: &AppState) {
-    let layout = calculate_layout(frame.area(), state.output.error_pane_visible);
+pub fn render(frame: &mut Frame<'_>, state: &AppState, max_editor_lines: usize) {
+    let editor_line_count = state.editor.textarea.lines().len();
+    let layout = calculate_layout(
+        frame.area(),
+        state.output.error_pane_visible,
+        editor_line_count,
+        max_editor_lines,
+    );
 
     render_output(frame, &layout, state);
     render_editor(frame, layout.editor, state);
@@ -152,10 +183,21 @@ fn render_editor(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     ));
     let (cursor_row, cursor_column) = state.editor.textarea.cursor();
     let inner_width = usize::from(area.width.saturating_sub(2)).max(1);
-    let horizontal_scroll = cursor_column.saturating_sub(inner_width.saturating_sub(1));
+    let inner_height = usize::from(area.height.saturating_sub(2)).max(1);
+    let line_len = state
+        .editor
+        .textarea
+        .lines()
+        .get(cursor_row)
+        .map(|line| line.chars().count())
+        .unwrap_or(0);
+    let horizontal_scroll = editor_horizontal_scroll(cursor_column, line_len, inner_width);
+    // Stateless, like the horizontal scroll: pin the cursor's row to the last
+    // visible row once the buffer has more lines than fit in the pane.
+    let vertical_scroll = cursor_row.saturating_sub(inner_height.saturating_sub(1));
     let editor = Paragraph::new(state.editor.text())
         .block(block)
-        .scroll((to_u16(cursor_row), to_u16(horizontal_scroll)));
+        .scroll((to_u16(vertical_scroll), to_u16(horizontal_scroll)));
     frame.render_widget(editor, area);
 
     // Ratatui hides the terminal cursor unless the renderer explicitly positions it.
@@ -163,7 +205,10 @@ fn render_editor(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         .x
         .saturating_add(1)
         .saturating_add(to_u16(cursor_column.saturating_sub(horizontal_scroll)));
-    let cursor_y = area.y.saturating_add(1);
+    let cursor_y = area
+        .y
+        .saturating_add(1)
+        .saturating_add(to_u16(cursor_row.saturating_sub(vertical_scroll)));
     frame.set_cursor_position((cursor_x, cursor_y));
 }
 
@@ -192,6 +237,8 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let hints = state.status_message.as_deref().unwrap_or_else(|| {
         if state.editor.vim_mode == VimMode::Insert {
             "Enter execute · Esc normal · Ctrl-Y copy output · Alt-Y copy command · Ctrl-E errors"
+        } else if status == EvaluationStatus::Stale {
+            "q keep · i insert · Alt-R restore last success · Ctrl-Y copy output · Ctrl-E errors"
         } else {
             "q keep · i insert · Ctrl-Y copy output · Alt-Y copy command · Ctrl-E errors"
         }
@@ -218,6 +265,15 @@ fn hidden_stderr(state: &AppState) -> bool {
             .is_some_and(|result| !result.stderr.is_empty())
 }
 
+/// Compute the editor's horizontal scroll so that at least `LOOKAHEAD_COLUMNS`
+/// of buffer stay visible past the cursor, as long as the line has that much text
+/// left. Near the end of the line we only guarantee two blank cells past the
+/// final character, rather than padding out to the full lookahead.
+fn editor_horizontal_scroll(cursor_column: usize, line_len: usize, inner_width: usize) -> usize {
+    let visible_target = (cursor_column + LOOKAHEAD_COLUMNS).min(line_len + 1);
+    visible_target.saturating_sub(inner_width.saturating_sub(1))
+}
+
 fn status_label(status: EvaluationStatus) -> &'static str {
     match status {
         EvaluationStatus::Empty => "EMPTY",
@@ -230,8 +286,9 @@ fn status_label(status: EvaluationStatus) -> &'static str {
 fn status_color(status: EvaluationStatus) -> Color {
     match status {
         EvaluationStatus::Current => Color::Green,
-        EvaluationStatus::Running => Color::Yellow,
-        EvaluationStatus::Empty | EvaluationStatus::Stale => Color::DarkGray,
+        EvaluationStatus::Empty | EvaluationStatus::Stale | EvaluationStatus::Running => {
+            Color::DarkGray
+        }
     }
 }
 
@@ -258,9 +315,32 @@ mod tests {
     #[test]
     fn status_styles_follow_spec_and_never_use_red() {
         assert_eq!(status_color(EvaluationStatus::Current), Color::Green);
-        assert_eq!(status_color(EvaluationStatus::Running), Color::Yellow);
+        assert_eq!(status_color(EvaluationStatus::Running), Color::DarkGray);
         assert_eq!(status_color(EvaluationStatus::Empty), Color::DarkGray);
         assert_eq!(status_color(EvaluationStatus::Stale), Color::DarkGray);
+    }
+
+    #[test]
+    fn editor_scroll_keeps_lookahead_buffer_when_room_remains() {
+        // Plenty of text after the cursor: scroll keeps a 5-column buffer, not less.
+        assert_eq!(editor_horizontal_scroll(10, 100, 20), 0);
+        assert_eq!(editor_horizontal_scroll(18, 100, 20), 4);
+    }
+
+    #[test]
+    fn editor_scroll_only_guarantees_two_blanks_past_end_of_line() {
+        // Cursor at end of a 12-char line: only two blank cells past the end
+        // need to be visible, not a full 5-column lookahead.
+        let line_len = 12;
+        assert_eq!(
+            editor_horizontal_scroll(line_len, line_len, 10),
+            line_len + 1 - 9
+        );
+        // One before the end behaves the same way.
+        assert_eq!(
+            editor_horizontal_scroll(line_len - 1, line_len, 10),
+            line_len + 1 - 9
+        );
     }
 
     #[test]
@@ -286,11 +366,11 @@ mod tests {
     #[test]
     fn preview_size_matches_stdout_inner_rect_without_error_pane() {
         let area = Rect::new(0, 0, 120, 40);
-        let layout = calculate_layout(area, false);
+        let layout = calculate_layout(area, false, 1, 5);
         assert!(layout.stderr.is_none());
 
         let inner = stdout_block().inner(layout.stdout);
-        let preview = stdout_inner_size(area, false);
+        let preview = stdout_inner_size(area, false, 1, 5);
         assert_eq!(preview, inner);
         assert_eq!((preview.width, preview.height), (118, 33));
     }
@@ -298,13 +378,30 @@ mod tests {
     #[test]
     fn preview_size_matches_stdout_inner_rect_with_error_pane_split() {
         let area = Rect::new(0, 0, 120, 40);
-        let layout = calculate_layout(area, true);
+        let layout = calculate_layout(area, true, 1, 5);
         assert!(layout.stderr.is_some());
 
         let inner = stdout_block().inner(layout.stdout);
-        let preview = stdout_inner_size(area, true);
+        let preview = stdout_inner_size(area, true, 1, 5);
         assert_eq!(preview, inner);
         assert_eq!(preview.width, layout.stdout.width - 2);
         assert_eq!(preview.height, layout.stdout.height - 2);
+    }
+
+    #[test]
+    fn editor_pane_grows_with_lines_up_to_the_configured_cap() {
+        let area = Rect::new(0, 0, 120, 40);
+
+        let one_line = calculate_layout(area, false, 1, 5);
+        assert_eq!(one_line.editor.height, 3);
+
+        let three_lines = calculate_layout(area, false, 3, 5);
+        assert_eq!(three_lines.editor.height, 5);
+
+        let many_lines = calculate_layout(area, false, 50, 5);
+        assert_eq!(many_lines.editor.height, 7); // capped at 5 content rows + borders
+
+        // Growing the editor pane shrinks the output pane accordingly.
+        assert!(many_lines.stdout.height < one_line.stdout.height);
     }
 }

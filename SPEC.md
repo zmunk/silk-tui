@@ -311,6 +311,41 @@ stderr 30%
 
 No pane focus or pane navigation is required.
 
+### 11a. Multi-line Command Editor
+
+The command buffer may contain real newline characters, not just a single
+visually-wrapped line. Each logical line occupies its own row in the editor
+pane; long lines scroll horizontally (per §11b) rather than wrapping.
+
+`Enter` always means "execute" (§22) and never inserts a newline. `Ctrl-J`
+inserts a literal newline at the cursor instead. Users are responsible for
+line continuations (trailing `\`) if a shell requires them; Silk does not
+rewrite or join lines.
+
+Terminal paste (bracketed paste) is inserted verbatim, including any embedded
+newlines, without triggering execution — newlines that arrive as part of a
+paste must not be interpreted as `Enter`.
+
+The editor pane grows with the number of lines in the buffer up to a
+configurable cap, then scrolls vertically to keep the cursor visible:
+
+```toml
+max_editor_lines = 5
+```
+
+Growing the editor pane shrinks the output pane accordingly; the output pane
+never shrinks below its `Constraint::Min(3)` floor.
+
+Vim motions and operators (`j`/`k`, `dd`, etc.) operate across lines.
+
+### 11b. Horizontal Scroll Buffer
+
+Whenever the cursor is within 5 columns of the right edge of the editor's
+visible width, keep scrolling to maintain at least 5 columns of buffer to the
+right of the cursor. Near the end of a line, where fewer than 5 characters of
+content remain, only guarantee 2 blank cells past the final character instead
+of padding out to the full 5-column lookahead.
+
 ---
 
 ## 12. Error Pane
@@ -355,9 +390,12 @@ Recommended:
 
 ```text
 green   Current
-yellow  Running
-gray    Empty or Stale
+gray    Running, Empty, or Stale
 ```
+
+Running keeps the same (gray) border color as Stale so the border doesn't
+flash between colors while typing; the "RUNNING" text label is still shown so
+the state remains distinguishable.
 
 Do not use red for failures.
 
@@ -443,6 +481,8 @@ enum VimAction {
 
     WordForward,
     WordBackward,
+    WordForwardBig,
+    WordBackwardBig,
     WordEnd,
 
     EnterInsertMode,
@@ -644,9 +684,15 @@ h       cursor left
 l       cursor right
 w       next word
 b       previous word
+W       next WORD (whitespace-delimited)
+B       previous WORD (whitespace-delimited)
 e       end of word
 0       beginning of line
 $       end of line
+f<c>    to next occurrence of <c>
+F<c>    to previous occurrence of <c>
+t<c>    till next occurrence of <c>
+T<c>    till previous occurrence of <c>
 ```
 
 Default transitions:
@@ -662,13 +708,26 @@ Default editing:
 
 ```text
 x       delete character
+r<c>    replace the character under the cursor with <c>
 cc      clear the whole line and enter Insert mode
 C       delete from the cursor through the end of the line and enter Insert mode
+cw/cW   change to the end of the current word/WORD and enter Insert mode
+ce      change to the end of the current/next word (inclusive) and enter Insert mode
+c0/c$   change to the beginning/end of the line and enter Insert mode
+cb      change the previous word and enter Insert mode
+cf<c>/ct<c>   change up to/through <c> (forward) and enter Insert mode
+cF<c>/cT<c>   change back to/through <c> (backward) and enter Insert mode
 dd      clear the whole line and remain in Normal mode
 D       delete from the cursor through the end of the line and remain in Normal mode
 u       undo
 Ctrl-R  redo
 ```
+
+The `c` operator family (`cw`, `ct<c>`, etc.), `f`/`F`/`t`/`T`, and `r` are
+fixed Vim grammar handled directly by the controller rather than single
+`VimAction` keymap entries, because they combine a leading key with an
+arbitrary following motion or target character. They are not currently
+user-remappable.
 
 Exit without execution:
 
@@ -692,6 +751,7 @@ Ctrl-C      cancellation warning / cancel
 Ctrl-E      toggle error pane
 Ctrl-Y      copy current output
 Alt-Y       copy current command
+Alt-R       restore the last successful command (only while STALE)
 Ctrl-D      half-page scroll down
 Ctrl-U      half-page scroll up
 G           scroll bottom
@@ -873,6 +933,7 @@ input_mode = "vim"
 shell = "zsh"
 debounce_ms = 100
 clipboard_command = "copy"
+max_editor_lines = 5
 
 [keybindings]
 copy_output = "ctrl-y"
@@ -898,15 +959,18 @@ Configuration parsing should remain isolated from runtime behavior.
 
 ## 29. Shell Integration Contract
 
-Silk requires the current shell buffer through `--query`. Both forms are supported:
+Silk accepts the current shell buffer through `--query`, which is optional. Both
+forms are supported when provided:
 
 ```sh
 silk --query "$BUFFER"
 silk --query="$BUFFER"
 ```
 
-An empty query value is valid. A missing value, duplicate `--query`, or unknown
-argument is an unexpected Silk failure.
+An empty query value is valid, and omitting `--query` entirely is equivalent to
+`--query ""` (Silk opens with an empty command buffer). A duplicate `--query`,
+a `--query` flag with no value, or an unknown argument is an unexpected Silk
+failure.
 
 Exit meanings:
 

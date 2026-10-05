@@ -72,10 +72,14 @@ pub enum VimMode {
 pub enum VimAction {
     CursorLeft,
     CursorRight,
+    CursorUp,
+    CursorDown,
     BeginningOfLine,
     EndOfLine,
     WordForward,
     WordBackward,
+    WordForwardBig,
+    WordBackwardBig,
     WordEnd,
     EnterInsertMode,
     ExitInsertMode,
@@ -108,6 +112,7 @@ pub enum GlobalAction {
     ScrollHalfPageUp,
     ScrollTop,
     ScrollBottom,
+    RestoreLastValidCommand,
     KeepCommand,
 }
 
@@ -154,8 +159,12 @@ impl VimKeymap {
         // Motions
         normal.insert(ch('h'), CursorLeft);
         normal.insert(ch('l'), CursorRight);
+        normal.insert(ch('j'), CursorDown);
+        normal.insert(ch('k'), CursorUp);
         normal.insert(ch('w'), WordForward);
         normal.insert(ch('b'), WordBackward);
+        normal.insert(ch('W'), WordForwardBig);
+        normal.insert(ch('B'), WordBackwardBig);
         normal.insert(ch('e'), WordEnd);
         normal.insert(ch('0'), BeginningOfLine);
         normal.insert(ch('$'), EndOfLine);
@@ -177,7 +186,6 @@ impl VimKeymap {
         normal.insert(ch('q'), KeepCommand);
 
         let mut normal_sequences = HashMap::new();
-        normal_sequences.insert((ch('c'), ch('c')), ChangeWholeLine);
         normal_sequences.insert((ch('d'), ch('d')), DeleteWholeLine);
 
         // --- Insert mode defaults (§20) ---
@@ -269,6 +277,7 @@ impl Keymap {
         globals.insert(ctrl('d'), ScrollHalfPageDown);
         globals.insert(ctrl('u'), ScrollHalfPageUp);
         globals.insert(ch('G'), ScrollBottom);
+        globals.insert(alt('r'), RestoreLastValidCommand);
 
         Self {
             globals,
@@ -868,6 +877,7 @@ mod tests {
         assert!(actions.contains(&GlobalAction::ScrollHalfPageDown));
         assert!(actions.contains(&GlobalAction::ScrollHalfPageUp));
         assert!(actions.contains(&GlobalAction::ScrollBottom));
+        assert!(actions.contains(&GlobalAction::RestoreLastValidCommand));
         assert_eq!(km.gg_action, Some(GlobalAction::ScrollTop));
     }
 
@@ -913,12 +923,7 @@ mod tests {
             }),
             Some(&VimAction::DeleteToLineStart)
         );
-        let c: KeyChord = "c".parse().unwrap();
         let d: KeyChord = "d".parse().unwrap();
-        assert_eq!(
-            km.normal_sequences.get(&(c, c)),
-            Some(&VimAction::ChangeWholeLine)
-        );
         assert_eq!(
             km.normal_sequences.get(&(d, d)),
             Some(&VimAction::DeleteWholeLine)

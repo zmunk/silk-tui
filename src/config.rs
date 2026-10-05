@@ -33,6 +33,7 @@ struct RawConfig {
     shell: String,
     debounce_ms: u64,
     clipboard_command: String,
+    max_editor_lines: usize,
     #[serde(rename = "keybindings")]
     keybindings: HashMap<String, String>,
     #[serde(rename = "environment")]
@@ -56,6 +57,7 @@ impl Default for RawConfig {
             shell: "zsh".to_string(),
             debounce_ms: 100,
             clipboard_command: default_clipboard_command(),
+            max_editor_lines: default_max_editor_lines(),
             keybindings: HashMap::new(),
             environment: HashMap::new(),
             vim_keybindings: RawVimKeybindings::default(),
@@ -84,6 +86,9 @@ pub struct Config {
     pub debounce_ms: u64,
     pub clipboard_command: String,
     pub environment: HashMap<String, String>,
+    /// Maximum number of visible rows in the (multi-line) command editor before
+    /// it scrolls instead of growing further (§15a).
+    pub max_editor_lines: usize,
     /// Resolved keymap (global + vim) built from defaults merged with user overrides.
     pub keymap: Keymap,
 }
@@ -138,12 +143,17 @@ impl RawConfig {
             keymap = keymap.with_vim_overrides(&self.vim_keybindings.insert, VimMode::Insert)?;
         }
 
+        if self.max_editor_lines == 0 {
+            anyhow::bail!("max_editor_lines must be at least 1");
+        }
+
         Ok(Config {
             input_mode,
             shell: self.shell.clone(),
             debounce_ms: self.debounce_ms,
             clipboard_command: self.clipboard_command.clone(),
             environment: self.environment.clone(),
+            max_editor_lines: self.max_editor_lines,
             keymap,
         })
     }
@@ -176,6 +186,12 @@ fn config_path() -> PathBuf {
 // ---------------------------------------------------------------------------
 // Platform-appropriate default clipboard command
 // ---------------------------------------------------------------------------
+
+/// Sensible default cap on visible command-editor rows: enough for a short
+/// multi-line script without eating too much of the output pane.
+fn default_max_editor_lines() -> usize {
+    5
+}
 
 fn default_clipboard_command() -> String {
     #[cfg(target_os = "macos")]
@@ -224,9 +240,18 @@ mod tests {
         assert_eq!(config.input_mode, InputMode::Vim);
         assert_eq!(config.shell, "zsh");
         assert_eq!(config.debounce_ms, 100);
+        assert_eq!(config.max_editor_lines, 5);
         // Keymap should have defaults
         assert!(config.keymap.globals.len() > 0);
         assert!(config.keymap.vim.normal.len() > 0);
+    }
+
+    #[test]
+    fn max_editor_lines_is_configurable_and_validated() {
+        let config = parse("max_editor_lines = 3").unwrap();
+        assert_eq!(config.max_editor_lines, 3);
+
+        assert!(parse("max_editor_lines = 0").is_err());
     }
 
     #[test]

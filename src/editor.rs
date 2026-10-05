@@ -52,10 +52,14 @@ pub fn apply_vim_action(action: VimAction, editor: &mut EditorState) -> EditorEf
     match action {
         CursorLeft => editor.textarea.move_cursor(CursorMove::Back),
         CursorRight => editor.textarea.move_cursor(CursorMove::Forward),
+        CursorUp => editor.textarea.move_cursor(CursorMove::Up),
+        CursorDown => editor.textarea.move_cursor(CursorMove::Down),
         BeginningOfLine => editor.textarea.move_cursor(CursorMove::Head),
         EndOfLine => editor.textarea.move_cursor(CursorMove::End),
         WordForward => editor.textarea.move_cursor(CursorMove::WordForward),
         WordBackward => editor.textarea.move_cursor(CursorMove::WordBack),
+        WordForwardBig => word_forward_big(editor),
+        WordBackwardBig => word_backward_big(editor),
         WordEnd => move_to_word_end(editor),
         EnterInsertMode => editor.vim_mode = VimMode::Insert,
         ExitInsertMode => {
@@ -93,7 +97,7 @@ pub fn apply_vim_action(action: VimAction, editor: &mut EditorState) -> EditorEf
             editor.textarea.delete_line_by_end();
             editor.vim_mode = VimMode::Insert;
         }
-        DeleteWholeLine => clear_current_line(editor),
+        DeleteWholeLine => delete_current_line_entirely(editor),
         DeleteToLineEnd => {
             editor.textarea.delete_line_by_end();
         }
@@ -109,9 +113,279 @@ pub fn apply_vim_action(action: VimAction, editor: &mut EditorState) -> EditorEf
     EditorEffect::None
 }
 
+/// Insert arbitrary text (e.g. a terminal paste) at the cursor, preserving any
+/// embedded newlines as real line breaks rather than triggering Enter semantics.
+pub fn insert_text(editor: &mut EditorState, text: &str) {
+    for ch in text.chars() {
+        match ch {
+            '\n' => editor.textarea.insert_newline(),
+            '\r' => {}
+            ch => editor.textarea.insert_char(ch),
+        }
+    }
+}
+
 fn clear_current_line(editor: &mut EditorState) {
     editor.textarea.move_cursor(CursorMove::Head);
     editor.textarea.delete_line_by_end();
+}
+
+/// Vim's `dd` on a multi-line buffer must remove the line itself, not just its
+/// content, so the following (or preceding, on the last line) line takes its place.
+fn delete_current_line_entirely(editor: &mut EditorState) {
+    clear_current_line(editor);
+    let line_count = editor.textarea.lines().len();
+    if line_count <= 1 {
+        return;
+    }
+    let (row, _) = editor.textarea.cursor();
+    if row + 1 < line_count {
+        // Merge the now-empty current line with the one below it.
+        editor.textarea.delete_next_char();
+    } else {
+        // Last line: merge upward into the previous line instead.
+        editor.textarea.delete_char();
+    }
+}
+
+/// Move the cursor to an absolute column on its current row, using repeated
+/// single-column moves so it works uniformly across `tui-textarea` versions.
+fn move_cursor_to_column(editor: &mut EditorState, target_col: usize) {
+    let (_, column) = editor.textarea.cursor();
+    if target_col > column {
+        for _ in column..target_col {
+            editor.textarea.move_cursor(CursorMove::Forward);
+        }
+    } else {
+        for _ in target_col..column {
+            editor.textarea.move_cursor(CursorMove::Back);
+        }
+    }
+}
+
+/// Vim's `W`: move to the start of the next WORD (whitespace-delimited, unlike `w`).
+fn word_forward_big(editor: &mut EditorState) {
+    let (row, column) = editor.textarea.cursor();
+    let Some(line) = editor.textarea.lines().get(row) else {
+        return;
+    };
+    let chars: Vec<char> = line.chars().collect();
+    if chars.is_empty() {
+        return;
+    }
+
+    let mut target = column;
+    while target < chars.len() && !chars[target].is_whitespace() {
+        target += 1;
+    }
+    while target < chars.len() && chars[target].is_whitespace() {
+        target += 1;
+    }
+    let target = target.min(chars.len().saturating_sub(1));
+    move_cursor_to_column(editor, target);
+}
+
+/// Vim's `B`: move to the start of the previous WORD (whitespace-delimited).
+fn word_backward_big(editor: &mut EditorState) {
+    let (row, column) = editor.textarea.cursor();
+    let Some(line) = editor.textarea.lines().get(row) else {
+        return;
+    };
+    let chars: Vec<char> = line.chars().collect();
+    if column == 0 || chars.is_empty() {
+        return;
+    }
+
+    let mut target = column - 1;
+    while target > 0 && chars[target].is_whitespace() {
+        target -= 1;
+    }
+    while target > 0 && !chars[target - 1].is_whitespace() {
+        target -= 1;
+    }
+    move_cursor_to_column(editor, target);
+}
+
+/// A Vim character-seeking motion: `f`/`F` (to the char) or `t`/`T` (till it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindMotion {
+    ForwardTo,
+    ForwardTill,
+    BackwardTo,
+    BackwardTill,
+}
+
+/// Compute the target column for a find/till motion on the current row, without
+/// moving the cursor. Returns `None` if `target` does not occur in the required
+/// direction.
+fn find_target_column(editor: &EditorState, motion: FindMotion, target: char) -> Option<usize> {
+    let (row, column) = editor.textarea.cursor();
+    let line = editor.textarea.lines().get(row)?;
+    let chars: Vec<char> = line.chars().collect();
+
+    match motion {
+        FindMotion::ForwardTo => (column + 1..chars.len()).find(|&i| chars[i] == target),
+        FindMotion::ForwardTill => (column + 2..chars.len())
+            .find(|&i| chars[i] == target)
+            .map(|i| i - 1),
+        FindMotion::BackwardTo => (0..column).rev().find(|&i| chars[i] == target),
+        FindMotion::BackwardTill => {
+            if column < 2 {
+                return None;
+            }
+            (0..column - 1).rev().find(|&i| chars[i] == target).map(|i| i + 1)
+        }
+    }
+}
+
+/// Apply a standalone (non-operator) find/till motion. Returns `true` if `target`
+/// was found and the cursor moved.
+pub fn apply_find_motion(editor: &mut EditorState, motion: FindMotion, target: char) -> bool {
+    match find_target_column(editor, motion, target) {
+        Some(column) => {
+            move_cursor_to_column(editor, column);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Replace the character under the cursor with `ch` (Vim's `r`), leaving the
+/// cursor in place and staying in Normal mode.
+pub fn replace_char(editor: &mut EditorState, ch: char) {
+    let (row, column) = editor.textarea.cursor();
+    let Some(line) = editor.textarea.lines().get(row) else {
+        return;
+    };
+    if column >= line.chars().count() {
+        return;
+    }
+    editor.textarea.delete_next_char();
+    editor.textarea.insert_char(ch);
+    editor.textarea.move_cursor(CursorMove::Back);
+}
+
+/// Delete the half-open column range `[start_col, end_col)` on the current row
+/// and enter Insert mode at `start_col` (the shared tail of every Vim `c`
+/// operator + motion combination).
+fn change_range(editor: &mut EditorState, start_col: usize, end_col: usize) {
+    move_cursor_to_column(editor, start_col);
+    for _ in start_col..end_col {
+        editor.textarea.delete_next_char();
+    }
+    editor.vim_mode = VimMode::Insert;
+}
+
+fn word_end_target_column(chars: &[char], column: usize) -> usize {
+    if column >= chars.len() {
+        return column;
+    }
+    let mut target = column;
+    if chars[target].is_whitespace() {
+        while target < chars.len() && chars[target].is_whitespace() {
+            target += 1;
+        }
+    } else if target + 1 < chars.len() {
+        target += 1;
+    }
+    while target + 1 < chars.len() && !chars[target + 1].is_whitespace() {
+        target += 1;
+    }
+    target
+}
+
+/// Vim's `cw`: behaves like `ce` when the cursor is on a non-blank character
+/// (it does not consume trailing whitespace before the next word), and like a
+/// plain word-delete when the cursor is on whitespace.
+pub fn change_word(editor: &mut EditorState) {
+    let (row, column) = editor.textarea.cursor();
+    let Some(line) = editor.textarea.lines().get(row) else {
+        return;
+    };
+    let chars: Vec<char> = line.chars().collect();
+    if column >= chars.len() {
+        editor.vim_mode = VimMode::Insert;
+        return;
+    }
+
+    let end = if chars[column].is_whitespace() {
+        let mut target = column;
+        while target < chars.len() && chars[target].is_whitespace() {
+            target += 1;
+        }
+        target
+    } else {
+        word_end_target_column(&chars, column) + 1
+    };
+    change_range(editor, column, end);
+}
+
+/// Vim's `cW`: as [`change_word`], but WORD-delimited (whitespace only).
+pub fn change_word_big(editor: &mut EditorState) {
+    let (row, column) = editor.textarea.cursor();
+    let Some(line) = editor.textarea.lines().get(row) else {
+        return;
+    };
+    let chars: Vec<char> = line.chars().collect();
+    if column >= chars.len() {
+        editor.vim_mode = VimMode::Insert;
+        return;
+    }
+
+    let mut end = column;
+    if chars[end].is_whitespace() {
+        while end < chars.len() && chars[end].is_whitespace() {
+            end += 1;
+        }
+    } else {
+        while end < chars.len() && !chars[end].is_whitespace() {
+            end += 1;
+        }
+    }
+    change_range(editor, column, end);
+}
+
+/// Vim's `ce`: change to the end of the current/next word (inclusive).
+pub fn change_to_word_end(editor: &mut EditorState) {
+    let (row, column) = editor.textarea.cursor();
+    let Some(line) = editor.textarea.lines().get(row) else {
+        return;
+    };
+    let chars: Vec<char> = line.chars().collect();
+    let end = word_end_target_column(&chars, column) + 1;
+    change_range(editor, column, end);
+}
+
+/// Vim's `c0`: change from the start of the line up to (not including) the cursor.
+pub fn change_to_line_start(editor: &mut EditorState) {
+    let (_, column) = editor.textarea.cursor();
+    change_range(editor, 0, column);
+}
+
+/// Vim's `cb`: change the previous word, from its start up to (not including) the cursor.
+pub fn change_word_backward(editor: &mut EditorState) {
+    let (_, column) = editor.textarea.cursor();
+    word_backward_big_dry_run(editor); // positions cursor at the word start for reuse below
+    let (_, start) = editor.textarea.cursor();
+    change_range(editor, start, column);
+}
+
+fn word_backward_big_dry_run(editor: &mut EditorState) {
+    // `cb` uses the small-word backward motion, not the WORD one.
+    editor.textarea.move_cursor(CursorMove::WordBack);
+}
+
+/// Apply a Vim `c` operator paired with a find/till motion (`cf`, `cF`, `ct`, `cT`).
+pub fn change_over_find(editor: &mut EditorState, motion: FindMotion, target: char) -> bool {
+    let (_, column) = editor.textarea.cursor();
+    let Some(found) = find_target_column(editor, motion, target) else {
+        return false;
+    };
+    match motion {
+        FindMotion::ForwardTo | FindMotion::ForwardTill => change_range(editor, column, found + 1),
+        FindMotion::BackwardTo | FindMotion::BackwardTill => change_range(editor, found, column),
+    }
+    true
 }
 
 /// Vim's `e`: move to the final character of the current or next word.
@@ -270,5 +544,124 @@ mod tests {
         editor.textarea.move_cursor(CursorMove::End);
         apply_vim_action(action, &mut editor);
         assert_eq!(editor.text(), "");
+    }
+
+    #[test]
+    fn big_word_motions_are_whitespace_delimited() {
+        let mut editor = editor("foo-bar baz_qux");
+        apply_vim_action(VimAction::WordForwardBig, &mut editor);
+        assert_eq!(editor.textarea.cursor(), (0, 8));
+        apply_vim_action(VimAction::WordBackwardBig, &mut editor);
+        assert_eq!(editor.textarea.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn find_and_till_motions_seek_within_the_line() {
+        let mut editor1 = editor("echo one two");
+        assert!(apply_find_motion(&mut editor1, FindMotion::ForwardTo, 'o'));
+        assert_eq!(editor1.textarea.cursor(), (0, 3));
+        assert!(apply_find_motion(&mut editor1, FindMotion::ForwardTo, 'w'));
+        assert_eq!(editor1.textarea.cursor(), (0, 10));
+        assert!(apply_find_motion(&mut editor1, FindMotion::BackwardTo, 'o'));
+        assert_eq!(editor1.textarea.cursor(), (0, 5));
+
+        let mut editor2 = editor("echo one two");
+        assert!(apply_find_motion(&mut editor2, FindMotion::ForwardTill, 'o'));
+        assert_eq!(editor2.textarea.cursor(), (0, 2));
+        assert!(!apply_find_motion(&mut editor2, FindMotion::ForwardTill, 'z'));
+    }
+
+    #[test]
+    fn replace_char_substitutes_in_place() {
+        let mut editor = editor("cat");
+        apply_vim_action(VimAction::CursorRight, &mut editor);
+        replace_char(&mut editor, 'u');
+        assert_eq!(editor.text(), "cut");
+        assert_eq!(editor.textarea.cursor(), (0, 1));
+    }
+
+    #[test]
+    fn change_word_matches_vim_cw_quirk() {
+        let mut editor = editor("foo bar");
+        change_word(&mut editor);
+        assert_eq!(editor.text(), " bar");
+        assert_eq!(editor.vim_mode, VimMode::Insert);
+    }
+
+    #[test]
+    fn change_word_big_is_whitespace_delimited() {
+        let mut editor = editor("foo-bar baz");
+        change_word_big(&mut editor);
+        assert_eq!(editor.text(), " baz");
+    }
+
+    #[test]
+    fn change_word_backward_deletes_previous_word() {
+        let mut editor = editor("foo bar");
+        editor.textarea.move_cursor(CursorMove::End);
+        change_word_backward(&mut editor);
+        assert_eq!(editor.text(), "foo ");
+    }
+
+    #[test]
+    fn change_to_word_end_is_inclusive() {
+        let mut editor = editor("foo bar");
+        change_to_word_end(&mut editor);
+        assert_eq!(editor.text(), " bar");
+    }
+
+    #[test]
+    fn change_to_line_start_deletes_before_cursor() {
+        let mut editor = editor("foo bar");
+        for _ in 0..4 {
+            editor.textarea.move_cursor(CursorMove::Forward);
+        }
+        change_to_line_start(&mut editor);
+        assert_eq!(editor.text(), "bar");
+    }
+
+    #[test]
+    fn change_over_find_deletes_inclusive_range() {
+        let mut editor = editor("echo one two");
+        assert!(change_over_find(&mut editor, FindMotion::ForwardTo, ' '));
+        assert_eq!(editor.text(), "one two");
+        assert_eq!(editor.vim_mode, VimMode::Insert);
+    }
+
+    #[test]
+    fn cursor_up_and_down_move_across_lines() {
+        let mut editor = editor("first\nsecond\nthird");
+        assert_eq!(editor.textarea.cursor(), (0, 0));
+        apply_vim_action(VimAction::CursorDown, &mut editor);
+        assert_eq!(editor.textarea.cursor().0, 1);
+        apply_vim_action(VimAction::CursorDown, &mut editor);
+        assert_eq!(editor.textarea.cursor().0, 2);
+        apply_vim_action(VimAction::CursorUp, &mut editor);
+        assert_eq!(editor.textarea.cursor().0, 1);
+    }
+
+    #[test]
+    fn delete_whole_line_removes_the_line_on_multiline_buffers() {
+        let mut middle = editor("first\nsecond\nthird");
+        apply_vim_action(VimAction::CursorDown, &mut middle);
+        apply_vim_action(VimAction::DeleteWholeLine, &mut middle);
+        assert_eq!(middle.text(), "first\nthird");
+
+        let mut last = editor("first\nsecond");
+        apply_vim_action(VimAction::CursorDown, &mut last);
+        apply_vim_action(VimAction::DeleteWholeLine, &mut last);
+        assert_eq!(last.text(), "first");
+
+        // Single-line buffers keep their prior (content-only) behavior.
+        let mut single = editor("only");
+        apply_vim_action(VimAction::DeleteWholeLine, &mut single);
+        assert_eq!(single.text(), "");
+    }
+
+    #[test]
+    fn insert_text_preserves_embedded_newlines() {
+        let mut editor = editor("");
+        insert_text(&mut editor, "one\ntwo\r\nthree");
+        assert_eq!(editor.text(), "one\ntwo\nthree");
     }
 }

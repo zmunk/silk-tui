@@ -2,14 +2,16 @@
 
 use crate::clipboard::{COPIED_MESSAGE, Clipboard};
 use crate::config::{Config, InputMode};
-use crate::editor::{EditorEffect, EditorState, apply_vim_action};
+use crate::editor::{EditorEffect, EditorState, FindMotion, apply_vim_action};
 use crate::evaluator::Evaluator;
-use crate::keymap::{GlobalAction, KeyChord, KeyCode, key_chord_from_crossterm};
-use crate::output::{EvaluationResult, OutputState};
+use crate::keymap::{GlobalAction, KeyChord, KeyCode, VimAction, key_chord_from_crossterm};
+use crate::output::{EvaluationResult, EvaluationStatus, OutputState};
 use crate::{protocol, ui};
 use anyhow::Context;
 use crossterm::cursor::SetCursorStyle;
-use crossterm::event::{self, Event, KeyEvent, KeyEventKind};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEvent, KeyEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -25,6 +27,23 @@ const FRAME_TIME: Duration = Duration::from_millis(16);
 const SUCCESS_MESSAGE_TIME: Duration = Duration::from_millis(1500);
 const ERROR_MESSAGE_TIME: Duration = Duration::from_secs(3);
 const CANCEL_MESSAGE: &str = "Press ctrl-c again to cancel and discard current command";
+const RESTORED_MESSAGE: &str = "restored last successful command";
+const NOTHING_TO_RESTORE_MESSAGE: &str = "nothing to restore";
+
+/// Tracks in-progress Vim Normal-mode grammar that spans more than one keypress:
+/// the `c` operator awaiting its motion, and the `f`/`F`/`t`/`T`/`r` family awaiting
+/// their target character (bare, or as the tail of a `c` + motion combination).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NormalPending {
+    None,
+    /// `c` pressed, awaiting a motion key.
+    Operator,
+    /// `f`/`F`/`t`/`T` pressed, awaiting the target character. `change` is `true`
+    /// when this follows `c` (e.g. `cf`, `ct`).
+    Find { motion: FindMotion, change: bool },
+    /// `r` pressed, awaiting the replacement character.
+    Replace,
+}
 
 type AppTerminal = Terminal<CrosstermBackend<Stderr>>;
 
@@ -73,6 +92,7 @@ pub struct App {
     cancel_pending: bool,
     pending_key: Option<KeyChord>,
     cursor_mode: Option<crate::keymap::VimMode>,
+    normal_pending: NormalPending,
 }
 
 impl App {
@@ -103,6 +123,7 @@ impl App {
             cancel_pending: false,
             pending_key: None,
             cursor_mode: None,
+            normal_pending: NormalPending::None,
         })
     }
 
@@ -130,25 +151,46 @@ impl App {
             if !event::poll(self.poll_timeout()).context("failed to poll terminal input")? {
                 continue;
             }
-            let key = match event::read().context("failed to read terminal input")? {
-                Event::Key(key) => key,
-                Event::Resize(_, _) => {
-                    self.queue_evaluation(true);
-                    continue;
+            match event::read().context("failed to read terminal input")? {
+                Event::Key(key) => {
+                    if key.kind == KeyEventKind::Release {
+                        continue;
+                    }
+                    if let Some(exit) = self.handle_key(key)? {
+                        return Ok(exit);
+                    }
                 }
-                _ => continue,
-            };
-            if key.kind == KeyEventKind::Release {
-                continue;
+                Event::Paste(text) => self.handle_paste(&text),
+                Event::Resize(_, _) => self.queue_evaluation(true),
+                _ => {}
             }
-            if let Some(exit) = self.handle_key(key)? {
-                return Ok(exit);
-            }
+        }
+    }
+
+    /// Insert a terminal paste verbatim, preserving embedded newlines as real
+    /// line breaks instead of letting them fall through as Enter keypresses.
+    fn handle_paste(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let before = self.state.editor.text();
+        crate::editor::insert_text(&mut self.state.editor, text);
+        if self.state.editor.text() != before {
+            self.queue_evaluation(false);
         }
     }
 
     fn handle_key(&mut self, key_event: KeyEvent) -> anyhow::Result<Option<AppExit>> {
         let key = key_chord_from_crossterm(key_event);
+
+        if self.config.input_mode == InputMode::Vim
+            && self.state.editor.vim_mode == crate::keymap::VimMode::Normal
+        {
+            if let Some(outcome) = self.handle_normal_grammar(key) {
+                return Ok(outcome);
+            }
+        }
+
         let insert_action = (self.config.input_mode == InputMode::Vim
             && self.state.editor.vim_mode == crate::keymap::VimMode::Insert)
             .then(|| {
@@ -246,6 +288,112 @@ impl App {
         Ok(None)
     }
 
+    /// Handle multi-key Vim Normal-mode grammar (`c` + motion, `f`/`F`/`t`/`T`, `r`)
+    /// that doesn't fit the single-chord `Keymap` model. Returns `Some(outcome)` if
+    /// `key` was consumed by this grammar (whether or not it changed anything), or
+    /// `None` if the caller should continue with its regular key handling.
+    fn handle_normal_grammar(&mut self, key: KeyChord) -> Option<Option<AppExit>> {
+        let pending = std::mem::replace(&mut self.normal_pending, NormalPending::None);
+
+        if pending != NormalPending::None {
+            if key.code == KeyCode::Esc {
+                return Some(None);
+            }
+            let before = self.state.editor.text();
+            match pending {
+                NormalPending::None => unreachable!(),
+                NormalPending::Replace => {
+                    if let KeyCode::Char(ch) = key.code {
+                        if !key.modifiers.ctrl && !key.modifiers.alt {
+                            crate::editor::replace_char(&mut self.state.editor, ch);
+                        }
+                    }
+                }
+                NormalPending::Find { motion, change } => {
+                    if let KeyCode::Char(ch) = key.code {
+                        if !key.modifiers.ctrl && !key.modifiers.alt {
+                            if change {
+                                crate::editor::change_over_find(&mut self.state.editor, motion, ch);
+                            } else {
+                                crate::editor::apply_find_motion(&mut self.state.editor, motion, ch);
+                            }
+                        }
+                    }
+                }
+                NormalPending::Operator => {
+                    if key.code == KeyCode::Char('c')
+                        && !key.modifiers.ctrl
+                        && !key.modifiers.alt
+                    {
+                        apply_vim_action(VimAction::ChangeWholeLine, &mut self.state.editor);
+                    } else if let Some(motion) = find_motion_for_key(key) {
+                        self.normal_pending = NormalPending::Find {
+                            motion,
+                            change: true,
+                        };
+                    } else {
+                        self.apply_change_motion_key(key);
+                    }
+                }
+            }
+            if self.state.editor.text() != before {
+                self.queue_evaluation(false);
+            }
+            return Some(None);
+        }
+
+        if key.modifiers.ctrl || key.modifiers.alt {
+            return None;
+        }
+        match key.code {
+            KeyCode::Char('c') => self.normal_pending = NormalPending::Operator,
+            KeyCode::Char('r') => self.normal_pending = NormalPending::Replace,
+            KeyCode::Char('f') => {
+                self.normal_pending = NormalPending::Find {
+                    motion: FindMotion::ForwardTo,
+                    change: false,
+                }
+            }
+            KeyCode::Char('F') => {
+                self.normal_pending = NormalPending::Find {
+                    motion: FindMotion::BackwardTo,
+                    change: false,
+                }
+            }
+            KeyCode::Char('t') => {
+                self.normal_pending = NormalPending::Find {
+                    motion: FindMotion::ForwardTill,
+                    change: false,
+                }
+            }
+            KeyCode::Char('T') => {
+                self.normal_pending = NormalPending::Find {
+                    motion: FindMotion::BackwardTill,
+                    change: false,
+                }
+            }
+            _ => return None,
+        }
+        Some(None)
+    }
+
+    /// Apply the `c` operator paired with a plain (non-find) motion key:
+    /// `cw`, `cW`, `ce`, `c0`, `c$`, `cb`.
+    fn apply_change_motion_key(&mut self, key: KeyChord) {
+        use crate::editor as ed;
+        match key.code {
+            KeyCode::Char('w') => ed::change_word(&mut self.state.editor),
+            KeyCode::Char('W') => ed::change_word_big(&mut self.state.editor),
+            KeyCode::Char('e') => ed::change_to_word_end(&mut self.state.editor),
+            KeyCode::Char('0') => ed::change_to_line_start(&mut self.state.editor),
+            KeyCode::Char('$') => {
+                apply_vim_action(VimAction::ChangeToLineEnd, &mut self.state.editor);
+            }
+            KeyCode::Char('b') => ed::change_word_backward(&mut self.state.editor),
+            _ => {}
+        }
+    }
+
     fn handle_editor_effect(&self, effect: EditorEffect) -> Option<AppExit> {
         match effect {
             EditorEffect::KeepCommand => Some(self.command_exit(0)),
@@ -302,6 +450,23 @@ impl App {
                 let max = self.active_scroll_max();
                 self.state.output.scroll_bottom(max);
             }
+            RestoreLastValidCommand => {
+                if self.state.output.status == EvaluationStatus::Stale {
+                    if let Some(command) = self
+                        .state
+                        .output
+                        .last_success
+                        .as_ref()
+                        .map(|result| result.command.clone())
+                    {
+                        self.state.editor.set_text(&command);
+                        self.queue_evaluation(true);
+                        self.set_message(RESTORED_MESSAGE, Some(SUCCESS_MESSAGE_TIME));
+                    }
+                } else {
+                    self.set_message(NOTHING_TO_RESTORE_MESSAGE, Some(SUCCESS_MESSAGE_TIME));
+                }
+            }
         }
         Ok(None)
     }
@@ -352,13 +517,19 @@ impl App {
     }
 
     fn preview_size(&self) -> Option<(u16, u16)> {
+        let editor_line_count = self.state.editor.textarea.lines().len();
+        let max_editor_lines = self.config.max_editor_lines;
         self.terminal
             .as_ref()
             .and_then(|terminal| terminal.size().ok())
             .map(|size| {
                 let area = ratatui::layout::Rect::new(0, 0, size.width, size.height);
-                let inner =
-                    ui::stdout_inner_size(area, self.state.output.error_pane_visible);
+                let inner = ui::stdout_inner_size(
+                    area,
+                    self.state.output.error_pane_visible,
+                    editor_line_count,
+                    max_editor_lines,
+                );
                 (inner.width.max(1), inner.height.max(1))
             })
     }
@@ -423,8 +594,9 @@ impl App {
             .as_mut()
             .context("terminal was not initialized")?;
         let state = &self.state;
+        let max_editor_lines = self.config.max_editor_lines;
         terminal
-            .draw(|frame| ui::render(frame, state))
+            .draw(|frame| ui::render(frame, state, max_editor_lines))
             .context("failed to draw terminal UI")?;
 
         if self.cursor_mode != Some(state.editor.vim_mode) {
@@ -443,7 +615,7 @@ impl App {
         enable_raw_mode().context("failed to enable raw mode")?;
         protocol::terminal_started();
         let mut output = stderr();
-        if let Err(error) = execute!(output, EnterAlternateScreen) {
+        if let Err(error) = execute!(output, EnterAlternateScreen, EnableBracketedPaste) {
             protocol::emergency_restore_terminal();
             return Err(error).context("failed to enter alternate screen");
         }
@@ -469,6 +641,7 @@ impl App {
             let leave = execute!(
                 terminal.backend_mut(),
                 SetCursorStyle::DefaultUserShape,
+                DisableBracketedPaste,
                 LeaveAlternateScreen
             )
             .context("failed to leave alternate screen");
@@ -492,12 +665,34 @@ impl Drop for App {
     }
 }
 
+/// Map a bare key to the find/till motion it starts (`f`, `F`, `t`, `T`), if any.
+fn find_motion_for_key(key: KeyChord) -> Option<FindMotion> {
+    if key.modifiers.ctrl || key.modifiers.alt {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char('f') => Some(FindMotion::ForwardTo),
+        KeyCode::Char('F') => Some(FindMotion::BackwardTo),
+        KeyCode::Char('t') => Some(FindMotion::ForwardTill),
+        KeyCode::Char('T') => Some(FindMotion::BackwardTill),
+        _ => None,
+    }
+}
+
 /// Apply ordinary text-entry keys without coupling `tui-textarea` to a different
 /// crossterm version than the application uses.
 fn apply_text_input(editor: &mut EditorState, event: KeyEvent) {
     use crossterm::event::KeyCode as CrosstermKey;
 
     match event.code {
+        // Enter means "execute" (handled as a global action); Ctrl-J is the
+        // dedicated "insert a literal newline" key instead.
+        CrosstermKey::Char('j')
+            if event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                && !event.modifiers.contains(crossterm::event::KeyModifiers::ALT) =>
+        {
+            editor.textarea.insert_newline();
+        }
         CrosstermKey::Char(character)
             if !event.modifiers.intersects(
                 crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT,
@@ -539,6 +734,7 @@ mod tests {
             debounce_ms: 100,
             clipboard_command: "cat >/dev/null".into(),
             environment: HashMap::new(),
+            max_editor_lines: 5,
             keymap: Keymap::defaults(),
         })
         .unwrap()
@@ -673,5 +869,113 @@ mod tests {
         app.handle_global_action(GlobalAction::CopyCommand).unwrap();
         assert_eq!(app.state.status_message.as_deref(), Some(COPIED_MESSAGE));
         assert!(app.message_deadline.is_some());
+    }
+
+    #[test]
+    fn ctrl_j_inserts_a_literal_newline_instead_of_executing() {
+        let mut app = app();
+        app.state.editor.vim_mode = crate::keymap::VimMode::Insert;
+        app.state.editor.set_text("echo one");
+        app.state.editor.textarea.move_cursor(CursorMove::End);
+
+        app.handle_key(KeyEvent::new(
+            crossterm::event::KeyCode::Char('j'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+
+        assert_eq!(app.state.editor.text(), "echo one\n");
+    }
+
+    #[test]
+    fn pasted_newlines_insert_literal_lines_without_executing() {
+        let mut app = app();
+        app.state.editor.vim_mode = crate::keymap::VimMode::Insert;
+        app.state.editor.set_text("");
+
+        app.handle_paste("echo one\necho two");
+
+        assert_eq!(app.state.editor.text(), "echo one\necho two");
+    }
+
+    #[test]
+    fn restore_last_valid_command_only_applies_when_stale() {
+        use crate::output::{EvaluationKind, EvaluationResult};
+
+        let mut app = app();
+        app.state.editor.set_text("echo broken");
+        app.state.output.status = crate::output::EvaluationStatus::Current;
+        app.handle_global_action(GlobalAction::RestoreLastValidCommand)
+            .unwrap();
+        assert_eq!(app.state.editor.text(), "echo broken");
+
+        app.state.output.status = crate::output::EvaluationStatus::Stale;
+        app.state.output.last_success = Some(EvaluationResult {
+            generation: 1,
+            command: "echo good".into(),
+            stdout: "good".into(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            kind: EvaluationKind::Success,
+        });
+        app.handle_global_action(GlobalAction::RestoreLastValidCommand)
+            .unwrap();
+        assert_eq!(app.state.editor.text(), "echo good");
+        assert_eq!(app.state.status_message.as_deref(), Some(RESTORED_MESSAGE));
+    }
+
+    #[test]
+    fn vim_grammar_handles_change_find_and_replace() {
+        let mut app = app();
+        app.state.editor.vim_mode = crate::keymap::VimMode::Normal;
+        app.state.editor.set_text("echo one two");
+
+        // `r` replaces the character under the cursor.
+        app.handle_key(KeyEvent::new(
+            crossterm::event::KeyCode::Char('r'),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .unwrap();
+        app.handle_key(KeyEvent::new(
+            crossterm::event::KeyCode::Char('E'),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .unwrap();
+        assert_eq!(app.state.editor.text(), "Echo one two");
+
+        // `cw` changes the first word and enters Insert mode.
+        app.handle_key(KeyEvent::new(
+            crossterm::event::KeyCode::Char('c'),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .unwrap();
+        app.handle_key(KeyEvent::new(
+            crossterm::event::KeyCode::Char('w'),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .unwrap();
+        assert_eq!(app.state.editor.text(), " one two");
+        assert_eq!(app.state.editor.vim_mode, crate::keymap::VimMode::Insert);
+
+        // `ct ` (change till space) from Normal mode on a fresh buffer.
+        app.state.editor.vim_mode = crate::keymap::VimMode::Normal;
+        app.state.editor.set_text("echo one two");
+        app.handle_key(KeyEvent::new(
+            crossterm::event::KeyCode::Char('c'),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .unwrap();
+        app.handle_key(KeyEvent::new(
+            crossterm::event::KeyCode::Char('t'),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .unwrap();
+        app.handle_key(KeyEvent::new(
+            crossterm::event::KeyCode::Char(' '),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .unwrap();
+        assert_eq!(app.state.editor.text(), " one two");
+        assert_eq!(app.state.editor.vim_mode, crate::keymap::VimMode::Insert);
     }
 }

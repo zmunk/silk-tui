@@ -2,6 +2,7 @@
 
 use anyhow::{Context, bail};
 use crossterm::cursor::SetCursorStyle;
+use crossterm::event::DisableBracketedPaste;
 use crossterm::execute;
 use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
 use std::ffi::OsString;
@@ -12,7 +13,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 static TERMINAL_ACTIVE: AtomicBool = AtomicBool::new(false);
 static PANIC_HOOK: Once = Once::new();
 
-/// Parse the required `--query "$BUFFER"` argument.
+/// Parse the optional `--query "$BUFFER"` argument. Defaults to an empty buffer
+/// when omitted, so Silk can be launched without a pre-filled command.
 pub fn parse_args() -> anyhow::Result<String> {
     parse_args_from(std::env::args_os().skip(1))
 }
@@ -44,7 +46,7 @@ fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> anyhow::Result<S
         }
     }
 
-    query.context("missing required --query argument")
+    Ok(query.unwrap_or_default())
 }
 
 /// Emit the shell-returned command exactly, with no diagnostic text or added newline.
@@ -84,6 +86,7 @@ pub(crate) fn emergency_restore_terminal() {
         let _ = execute!(
             io::stderr(),
             SetCursorStyle::DefaultUserShape,
+            DisableBracketedPaste,
             LeaveAlternateScreen
         );
     }
@@ -106,7 +109,7 @@ mod tests {
 
     #[test]
     fn rejects_missing_duplicate_and_unknown_arguments() {
-        assert!(parse(&[]).is_err());
+        assert_eq!(parse(&[]).unwrap(), "");
         assert!(parse(&["--query"]).is_err());
         assert!(parse(&["--query", "a", "--query", "b"]).is_err());
         assert!(parse(&["--other", "a"]).is_err());
