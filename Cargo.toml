@@ -1,0 +1,17 @@
+[package]
+name = "silk"
+version = "0.1.0"
+edition = "2024"
+description = "A lightweight terminal UI for editing shell commands while continuously previewing their output"
+
+[dependencies]
+ratatui = "0.30"
+crossterm = "0.29"
+tui-textarea = "0.7"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+anyhow = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
