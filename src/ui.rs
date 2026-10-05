@@ -82,7 +82,10 @@ fn render_stderr(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         .current_attempt
         .as_ref()
         .and_then(|result| result.exit_code)
-        .map_or_else(|| " ERRORS ".to_owned(), |code| format!(" ERRORS · EXIT {code} "));
+        .map_or_else(
+            || " ERRORS ".to_owned(),
+            |code| format!(" ERRORS · EXIT {code} "),
+        );
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)

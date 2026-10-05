@@ -201,9 +201,10 @@ of the stdout pane. Commands that honor these variables should therefore format
 output to the pane rather than the full terminal. Evaluation is rerun after a
 terminal resize or an error-pane toggle so these values remain current.
 
-A pane-sized pseudo-terminal is not required. Programs that exclusively inspect
-TTY ioctl dimensions instead of `COLUMNS` and `LINES` may still observe the host
-terminal dimensions.
+On Unix, preview stdout is attached to a pane-sized pseudo-terminal while stderr
+remains separately captured. This allows programs such as Nushell that inspect
+TTY ioctl dimensions to format for the pane. Platforms without this PTY path
+fall back to `COLUMNS` and `LINES`.
 
 ---
 

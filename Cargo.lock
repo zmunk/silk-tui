@@ -1347,6 +1347,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "crossterm 0.29.0",
+ "libc",
  "ratatui 0.30.2",
  "serde",
  "toml",

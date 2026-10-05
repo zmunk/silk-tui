@@ -2,7 +2,11 @@
 
 use crate::output::{EvaluationKind, EvaluationResult};
 use std::collections::HashMap;
-use std::io::Read;
+#[cfg(unix)]
+use std::fs::File;
+use std::io::{self, Read};
+#[cfg(unix)]
+use std::os::fd::FromRawFd;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc::Sender};
@@ -86,7 +90,7 @@ impl Evaluator {
             let syntax = syntax_command.spawn();
 
             let syntax = match syntax {
-                Ok(child) => run_child(child, generation, &latest, &current_child),
+                Ok(child) => run_child(child, generation, &latest, &current_child, None),
                 Err(error) => {
                     send_spawn_error(&tx, generation, command, error);
                     return;
@@ -119,13 +123,23 @@ impl Evaluator {
             execution_command
                 .args(["-c", script, "silk", &command])
                 .envs(&env_vars)
-                .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
             apply_preview_size(&mut execution_command, preview_size);
+            let preview_reader =
+                match configure_preview_output(&mut execution_command, preview_size) {
+                    Ok(reader) => reader,
+                    Err(error) => {
+                        send_spawn_error(&tx, generation, command, error);
+                        return;
+                    }
+                };
             let execution = execution_command.spawn();
+            // `Command` retains its configured PTY slave. Close that parent-side
+            // descriptor so the master reader observes EOF after the child exits.
+            drop(execution_command);
 
             let execution = match execution {
-                Ok(child) => run_child(child, generation, &latest, &current_child),
+                Ok(child) => run_child(child, generation, &latest, &current_child, preview_reader),
                 Err(error) => {
                     send_spawn_error(&tx, generation, command, error);
                     return;
@@ -188,10 +202,14 @@ fn run_child(
     generation: u64,
     latest: &AtomicU64,
     current: &Mutex<Option<RunningChild>>,
+    preview_reader: Option<Box<dyn Read + Send>>,
 ) -> Option<CapturedOutput> {
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let stdout_reader = thread::spawn(move || read_pipe(stdout));
+    let stdout_reader = thread::spawn(move || match preview_reader {
+        Some(reader) => read_pipe(Some(reader)).replace("\r\n", "\n"),
+        None => read_pipe(stdout),
+    });
     let stderr_reader = thread::spawn(move || read_pipe(stderr));
 
     {
@@ -255,6 +273,55 @@ fn run_child(
         stdout: stdout_reader.join().unwrap_or_default(),
         stderr: stderr_reader.join().unwrap_or_default(),
     })
+}
+
+#[cfg(unix)]
+fn configure_preview_output(
+    command: &mut Command,
+    preview_size: Option<(u16, u16)>,
+) -> io::Result<Option<Box<dyn Read + Send>>> {
+    let Some((columns, lines)) = preview_size else {
+        command.stdout(Stdio::piped());
+        return Ok(None);
+    };
+
+    let size = libc::winsize {
+        ws_row: lines,
+        ws_col: columns,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let mut master = -1;
+    let mut slave = -1;
+    // SAFETY: openpty initializes both file descriptors; null termios means
+    // platform defaults, and `size` remains valid for the duration of the call.
+    if unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            &size,
+        )
+    } == -1
+    {
+        return Err(io::Error::last_os_error());
+    }
+
+    // SAFETY: openpty returned two newly owned descriptors on success.
+    let master = unsafe { File::from_raw_fd(master) };
+    let slave = unsafe { File::from_raw_fd(slave) };
+    command.stdout(Stdio::from(slave));
+    Ok(Some(Box::new(master)))
+}
+
+#[cfg(not(unix))]
+fn configure_preview_output(
+    command: &mut Command,
+    _preview_size: Option<(u16, u16)>,
+) -> io::Result<Option<Box<dyn Read + Send>>> {
+    command.stdout(Stdio::piped());
+    Ok(None)
 }
 
 fn apply_preview_size(command: &mut Command, preview_size: Option<(u16, u16)>) {
@@ -392,6 +459,19 @@ mod tests {
         );
         let result = rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(result.stdout, "80 x 24");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preview_pty_reports_pane_dimensions() {
+        let evaluator = Evaluator::new("bash", HashMap::new());
+        let generation = evaluator.next_generation();
+        let (tx, rx) = mpsc::channel();
+        // `stty` inspects stdin by default; redirect it from preview stdout so
+        // this verifies the pane-sized PTY rather than the parent's terminal.
+        evaluator.evaluate("stty size <&1", generation, tx, Some((80, 24)));
+        let result = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(result.stdout, "24 80\n");
     }
 
     #[test]

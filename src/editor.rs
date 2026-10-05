@@ -37,7 +37,6 @@ impl EditorState {
     pub fn text(&self) -> String {
         self.textarea.lines().join("\n")
     }
-
 }
 
 impl Default for EditorState {
