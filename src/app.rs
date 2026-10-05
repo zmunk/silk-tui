@@ -356,15 +356,10 @@ impl App {
             .as_ref()
             .and_then(|terminal| terminal.size().ok())
             .map(|size| {
-                let pane_width = if self.state.output.error_pane_visible {
-                    size.width.saturating_mul(70) / 100
-                } else {
-                    size.width
-                };
-                (
-                    pane_width.saturating_sub(2).max(1),
-                    size.height.saturating_sub(7).max(1),
-                )
+                let area = ratatui::layout::Rect::new(0, 0, size.width, size.height);
+                let inner =
+                    ui::stdout_inner_size(area, self.state.output.error_pane_visible);
+                (inner.width.max(1), inner.height.max(1))
             })
     }
 

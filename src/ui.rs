@@ -13,32 +13,76 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 const NO_OUTPUT: &str = "(no output)";
 
-/// Render the complete UI as a pure view of `AppState`.
-pub fn render(frame: &mut Frame<'_>, state: &AppState) {
-    let areas = Layout::default()
+/// Pure layout geometry for the Silk UI: stdout pane, optional stderr pane,
+/// the editor, and the footer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UiLayout {
+    pub stdout: Rect,
+    pub stderr: Option<Rect>,
+    pub editor: Rect,
+    pub footer: Rect,
+}
+
+/// Compute the exact `Rect`s used by [`render`], as a pure function of the
+/// terminal `area` and whether the stderr pane is visible. Shared by the
+/// renderer and by preview-size calculation so both stay in lockstep.
+pub fn calculate_layout(area: Rect, error_pane_visible: bool) -> UiLayout {
+    let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),
             Constraint::Length(3),
             Constraint::Length(2),
         ])
-        .split(frame.area());
+        .split(area);
+    let output_area = rows[0];
+    let editor = rows[1];
+    let footer = rows[2];
 
-    render_output(frame, areas[0], state);
-    render_editor(frame, areas[1], state);
-    render_footer(frame, areas[2], state);
-}
-
-fn render_output(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
-    if state.output.error_pane_visible {
+    let (stdout, stderr) = if error_pane_visible {
         let panes = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-            .split(area);
-        render_stdout(frame, panes[0], state);
-        render_stderr(frame, panes[1], state);
+            .split(output_area);
+        (panes[0], Some(panes[1]))
     } else {
-        render_stdout(frame, area, state);
+        (output_area, None)
+    };
+
+    UiLayout {
+        stdout,
+        stderr,
+        editor,
+        footer,
+    }
+}
+
+/// Compute the usable interior of the stdout pane, using the same
+/// `Block::inner()` semantics as the `Borders::ALL` block rendered in
+/// [`render_stdout`]. This is the exact size passed to the evaluator as
+/// `COLUMNS` / `LINES` and as the PTY `ws_col` / `ws_row`.
+pub fn stdout_inner_size(area: Rect, error_pane_visible: bool) -> Rect {
+    let layout = calculate_layout(area, error_pane_visible);
+    stdout_block().inner(layout.stdout)
+}
+
+fn stdout_block() -> Block<'static> {
+    Block::default().borders(Borders::ALL)
+}
+
+/// Render the complete UI as a pure view of `AppState`.
+pub fn render(frame: &mut Frame<'_>, state: &AppState) {
+    let layout = calculate_layout(frame.area(), state.output.error_pane_visible);
+
+    render_output(frame, &layout, state);
+    render_editor(frame, layout.editor, state);
+    render_footer(frame, layout.footer, state);
+}
+
+fn render_output(frame: &mut Frame<'_>, layout: &UiLayout, state: &AppState) {
+    render_stdout(frame, layout.stdout, state);
+    if let Some(stderr) = layout.stderr {
+        render_stderr(frame, stderr, state);
     }
 }
 
@@ -237,5 +281,30 @@ mod tests {
     fn large_scroll_offsets_saturate_for_ratatui() {
         assert_eq!(to_u16(12), 12);
         assert_eq!(to_u16(usize::MAX), u16::MAX);
+    }
+
+    #[test]
+    fn preview_size_matches_stdout_inner_rect_without_error_pane() {
+        let area = Rect::new(0, 0, 120, 40);
+        let layout = calculate_layout(area, false);
+        assert!(layout.stderr.is_none());
+
+        let inner = stdout_block().inner(layout.stdout);
+        let preview = stdout_inner_size(area, false);
+        assert_eq!(preview, inner);
+        assert_eq!((preview.width, preview.height), (118, 33));
+    }
+
+    #[test]
+    fn preview_size_matches_stdout_inner_rect_with_error_pane_split() {
+        let area = Rect::new(0, 0, 120, 40);
+        let layout = calculate_layout(area, true);
+        assert!(layout.stderr.is_some());
+
+        let inner = stdout_block().inner(layout.stdout);
+        let preview = stdout_inner_size(area, true);
+        assert_eq!(preview, inner);
+        assert_eq!(preview.width, layout.stdout.width - 2);
+        assert_eq!(preview.height, layout.stdout.height - 2);
     }
 }

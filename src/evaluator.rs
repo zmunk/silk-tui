@@ -6,7 +6,9 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read};
 #[cfg(unix)]
-use std::os::fd::FromRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc::Sender};
@@ -311,6 +313,20 @@ fn configure_preview_output(
     // SAFETY: openpty returned two newly owned descriptors on success.
     let master = unsafe { File::from_raw_fd(master) };
     let slave = unsafe { File::from_raw_fd(slave) };
+    let slave_fd = slave.as_raw_fd();
+    // SAFETY: this hook only invokes async-signal-safe libc operations between
+    // fork and exec, and `slave_fd` remains owned by `command` until spawning.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::ioctl(slave_fd, libc::TIOCSCTTY, 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
     command.stdout(Stdio::from(slave));
     Ok(Some(Box::new(master)))
 }
@@ -336,6 +352,7 @@ fn read_pipe<R: Read>(pipe: Option<R>) -> String {
     if let Some(mut pipe) = pipe {
         let _ = pipe.read_to_end(&mut bytes);
     }
+    let bytes = strip_ansi_escapes::strip(bytes);
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
@@ -398,6 +415,14 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         evaluator.evaluate(command, generation, tx, None);
         rx.recv_timeout(Duration::from_secs(5)).unwrap()
+    }
+
+    #[test]
+    fn captured_output_strips_ansi_escape_sequences() {
+        let output = read_pipe(Some(std::io::Cursor::new(
+            b"\x1b[1;32mgreen\x1b[0m plain".to_vec(),
+        )));
+        assert_eq!(output, "green plain");
     }
 
     #[test]
