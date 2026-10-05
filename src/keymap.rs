@@ -92,6 +92,9 @@ pub enum VimAction {
     ChangeToLineEnd,
     DeleteWholeLine,
     DeleteToLineEnd,
+    DeleteWord,
+    DeleteWordBig,
+    OpenLineBelow,
     Undo,
     Redo,
     KeepCommand,
@@ -185,8 +188,13 @@ impl VimKeymap {
         // Exit without execution
         normal.insert(ch('q'), KeepCommand);
 
+        // Open a new line below and enter Insert mode.
+        normal.insert(ch('o'), OpenLineBelow);
+
         let mut normal_sequences = HashMap::new();
         normal_sequences.insert((ch('d'), ch('d')), DeleteWholeLine);
+        normal_sequences.insert((ch('d'), ch('w')), DeleteWord);
+        normal_sequences.insert((ch('d'), ch('W')), DeleteWordBig);
 
         // --- Insert mode defaults (§20) ---
         let mut insert: HashMap<KeyChord, VimAction> = HashMap::new();
@@ -271,13 +279,14 @@ impl Keymap {
             ExecuteCommand,
         );
         globals.insert(ctrl('c'), Cancel);
+        globals.insert(ctrl('q'), KeepCommand);
         globals.insert(ctrl('e'), ToggleErrorPane);
         globals.insert(ctrl('y'), CopyOutput);
         globals.insert(alt('y'), CopyCommand);
         globals.insert(ctrl('d'), ScrollHalfPageDown);
         globals.insert(ctrl('u'), ScrollHalfPageUp);
         globals.insert(ch('G'), ScrollBottom);
-        globals.insert(alt('r'), RestoreLastValidCommand);
+        globals.insert(alt('u'), RestoreLastValidCommand);
 
         Self {
             globals,

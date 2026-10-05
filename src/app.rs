@@ -763,6 +763,36 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_q_quits_from_both_vim_modes() {
+        let ctrl_q = KeyEvent::new(
+            crossterm::event::KeyCode::Char('q'),
+            crossterm::event::KeyModifiers::CONTROL,
+        );
+
+        let mut normal_app = app();
+        normal_app.state.editor.set_text("echo hello");
+        normal_app.state.editor.vim_mode = crate::keymap::VimMode::Normal;
+        assert_eq!(
+            normal_app.handle_key(ctrl_q).unwrap(),
+            Some(AppExit {
+                command: Some("echo hello".into()),
+                code: 0,
+            })
+        );
+
+        let mut insert_app = app();
+        insert_app.state.editor.set_text("echo hello");
+        insert_app.state.editor.vim_mode = crate::keymap::VimMode::Insert;
+        assert_eq!(
+            insert_app.handle_key(ctrl_q).unwrap(),
+            Some(AppExit {
+                command: Some("echo hello".into()),
+                code: 0,
+            })
+        );
+    }
+
+    #[test]
     fn ctrl_u_clears_to_line_start_in_insert_mode() {
         let mut app = app();
         app.state.editor.set_text("echo hello");

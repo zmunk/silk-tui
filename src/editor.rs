@@ -12,17 +12,30 @@ pub enum EditorEffect {
     KeepCommand,
 }
 
+/// A snapshot of buffer contents + cursor position, for our own word-granularity
+/// undo/redo stack (see below — we intentionally don't rely on `tui-textarea`'s
+/// built-in undo, which records every primitive `insert_char`/`delete_next_char`
+/// call as its own step).
+type UndoSnapshot = (Vec<String>, (usize, usize));
+
 /// Editor state: text buffer, cursor, Vim mode, undo/redo (§4, §16, §20).
 pub struct EditorState {
     pub textarea: TextArea<'static>,
     pub vim_mode: VimMode,
+    undo_stack: Vec<UndoSnapshot>,
+    redo_stack: Vec<UndoSnapshot>,
 }
+
+/// Snapshots older than this are dropped, so the undo stack can't grow forever.
+const MAX_UNDO_HISTORY: usize = 200;
 
 impl EditorState {
     pub fn new() -> Self {
         Self {
             textarea: TextArea::default(),
             vim_mode: VimMode::Insert,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
         }
     }
 
@@ -31,11 +44,56 @@ impl EditorState {
         // `split` preserves both an empty buffer and trailing newlines.
         let lines: Vec<String> = text.split('\n').map(String::from).collect();
         self.textarea = TextArea::from(lines);
+        self.undo_stack.clear();
+        self.redo_stack.clear();
     }
 
     /// Get the current command text.
     pub fn text(&self) -> String {
         self.textarea.lines().join("\n")
+    }
+
+    fn snapshot(&self) -> UndoSnapshot {
+        (self.textarea.lines().to_vec(), self.textarea.cursor())
+    }
+
+    /// Record the buffer as it is *before* a mutating Vim command runs, so a
+    /// later `u` can restore it in one step (e.g. all of `cw`'s delete + typed
+    /// replacement, or a whole `dw`/`dd`), rather than undoing one character
+    /// at a time.
+    fn push_undo(&mut self) {
+        self.undo_stack.push(self.snapshot());
+        if self.undo_stack.len() > MAX_UNDO_HISTORY {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
+    }
+
+    fn restore(&mut self, lines: Vec<String>, cursor: (usize, usize)) {
+        self.textarea = TextArea::from(lines);
+        let (row, column) = cursor;
+        for _ in 0..row {
+            self.textarea.move_cursor(CursorMove::Down);
+        }
+        for _ in 0..column {
+            self.textarea.move_cursor(CursorMove::Forward);
+        }
+    }
+
+    /// Undo the most recent recorded command, one word/command at a time.
+    pub fn undo(&mut self) {
+        if let Some((lines, cursor)) = self.undo_stack.pop() {
+            self.redo_stack.push(self.snapshot());
+            self.restore(lines, cursor);
+        }
+    }
+
+    /// Redo the most recently undone command.
+    pub fn redo(&mut self) {
+        if let Some((lines, cursor)) = self.redo_stack.pop() {
+            self.undo_stack.push(self.snapshot());
+            self.restore(lines, cursor);
+        }
     }
 }
 
@@ -61,7 +119,10 @@ pub fn apply_vim_action(action: VimAction, editor: &mut EditorState) -> EditorEf
         WordForwardBig => word_forward_big(editor),
         WordBackwardBig => word_backward_big(editor),
         WordEnd => move_to_word_end(editor),
-        EnterInsertMode => editor.vim_mode = VimMode::Insert,
+        EnterInsertMode => {
+            editor.push_undo();
+            editor.vim_mode = VimMode::Insert;
+        }
         ExitInsertMode => {
             // Match Vim: leaving Insert mode places the Normal-mode cursor on
             // the character immediately left of the insertion point.
@@ -72,41 +133,56 @@ pub fn apply_vim_action(action: VimAction, editor: &mut EditorState) -> EditorEf
             editor.vim_mode = VimMode::Normal;
         }
         AppendInsertMode => {
+            editor.push_undo();
             editor.textarea.move_cursor(CursorMove::Forward);
             editor.vim_mode = VimMode::Insert;
         }
         InsertAtBeginning => {
+            editor.push_undo();
             editor.textarea.move_cursor(CursorMove::Head);
             editor.vim_mode = VimMode::Insert;
         }
         AppendAtEnd => {
+            editor.push_undo();
             editor.textarea.move_cursor(CursorMove::End);
             editor.vim_mode = VimMode::Insert;
         }
+        OpenLineBelow => {
+            editor.push_undo();
+            editor.textarea.move_cursor(CursorMove::End);
+            editor.textarea.insert_newline();
+            editor.vim_mode = VimMode::Insert;
+        }
         DeleteChar => {
+            editor.push_undo();
             editor.textarea.delete_next_char();
         }
         DeleteToLineStart => {
+            editor.push_undo();
             editor.textarea.delete_line_by_head();
         }
         ChangeWholeLine => {
+            editor.push_undo();
             clear_current_line(editor);
             editor.vim_mode = VimMode::Insert;
         }
         ChangeToLineEnd => {
+            editor.push_undo();
             editor.textarea.delete_line_by_end();
             editor.vim_mode = VimMode::Insert;
         }
-        DeleteWholeLine => delete_current_line_entirely(editor),
+        DeleteWholeLine => {
+            editor.push_undo();
+            delete_current_line_entirely(editor);
+        }
         DeleteToLineEnd => {
+            editor.push_undo();
             editor.textarea.delete_line_by_end();
         }
-        Undo => {
-            editor.textarea.undo();
-        }
-        Redo => {
-            editor.textarea.redo();
-        }
+        DeleteWord => delete_word(editor),
+        DeleteWordBig => delete_word_big(editor),
+        Undo => editor.undo(),
+        Redo => editor.redo(),
         KeepCommand => return EditorEffect::KeepCommand,
     }
 
@@ -260,20 +336,57 @@ pub fn replace_char(editor: &mut EditorState, ch: char) {
     if column >= line.chars().count() {
         return;
     }
+    editor.push_undo();
     editor.textarea.delete_next_char();
     editor.textarea.insert_char(ch);
     editor.textarea.move_cursor(CursorMove::Back);
+}
+
+/// Delete the half-open column range `[start_col, end_col)` on the current row,
+/// recording one undo step for the whole range (the shared tail of every Vim
+/// `d` operator + motion combination).
+fn delete_range(editor: &mut EditorState, start_col: usize, end_col: usize) {
+    editor.push_undo();
+    move_cursor_to_column(editor, start_col);
+    for _ in start_col..end_col {
+        editor.textarea.delete_next_char();
+    }
 }
 
 /// Delete the half-open column range `[start_col, end_col)` on the current row
 /// and enter Insert mode at `start_col` (the shared tail of every Vim `c`
 /// operator + motion combination).
 fn change_range(editor: &mut EditorState, start_col: usize, end_col: usize) {
+    editor.push_undo();
     move_cursor_to_column(editor, start_col);
     for _ in start_col..end_col {
         editor.textarea.delete_next_char();
     }
     editor.vim_mode = VimMode::Insert;
+}
+
+/// Vim's `dw`: delete from the cursor up to (not including) the start of the
+/// next word, without crossing to the next line.
+fn delete_word(editor: &mut EditorState) {
+    let (row, start_col) = editor.textarea.cursor();
+    let line_len = editor
+        .textarea
+        .lines()
+        .get(row)
+        .map(|line| line.chars().count())
+        .unwrap_or(0);
+    editor.textarea.move_cursor(CursorMove::WordForward);
+    let (new_row, target_col) = editor.textarea.cursor();
+    let end_col = if new_row != row { line_len } else { target_col };
+    delete_range(editor, start_col.min(end_col), start_col.max(end_col));
+}
+
+/// Vim's `dW`: as [`delete_word`], but WORD-delimited (whitespace only).
+fn delete_word_big(editor: &mut EditorState) {
+    let (_, start_col) = editor.textarea.cursor();
+    word_forward_big(editor);
+    let (_, end_col) = editor.textarea.cursor();
+    delete_range(editor, start_col.min(end_col), start_col.max(end_col));
 }
 
 fn word_end_target_column(chars: &[char], column: usize) -> usize {
@@ -626,6 +739,56 @@ mod tests {
         assert!(change_over_find(&mut editor, FindMotion::ForwardTo, ' '));
         assert_eq!(editor.text(), "one two");
         assert_eq!(editor.vim_mode, VimMode::Insert);
+    }
+
+    #[test]
+    fn delete_word_removes_up_to_next_word_start() {
+        let mut editor = editor("foo bar baz");
+        editor.vim_mode = VimMode::Normal;
+        apply_vim_action(VimAction::DeleteWord, &mut editor);
+        assert_eq!(editor.text(), "bar baz");
+        assert_eq!(editor.vim_mode, VimMode::Normal);
+    }
+
+    #[test]
+    fn delete_word_big_is_whitespace_delimited() {
+        let mut editor = editor("foo-bar baz");
+        apply_vim_action(VimAction::DeleteWordBig, &mut editor);
+        assert_eq!(editor.text(), "baz");
+    }
+
+    #[test]
+    fn open_line_below_inserts_newline_and_enters_insert_mode() {
+        let mut editor = editor("first");
+        apply_vim_action(VimAction::OpenLineBelow, &mut editor);
+        assert_eq!(editor.text(), "first\n");
+        assert_eq!(editor.vim_mode, VimMode::Insert);
+        assert_eq!(editor.textarea.cursor(), (1, 0));
+    }
+
+    #[test]
+    fn undo_restores_the_whole_word_changed_by_cw_in_one_step() {
+        let mut editor = editor("foo bar");
+        change_word(&mut editor); // deletes "foo", enters Insert mode
+        insert_text(&mut editor, "quux");
+        apply_vim_action(VimAction::ExitInsertMode, &mut editor);
+        assert_eq!(editor.text(), "quux bar");
+
+        apply_vim_action(VimAction::Undo, &mut editor);
+        assert_eq!(editor.text(), "foo bar");
+    }
+
+    #[test]
+    fn undo_and_redo_restore_whole_commands() {
+        let mut editor = editor("foo bar");
+        apply_vim_action(VimAction::DeleteWord, &mut editor);
+        assert_eq!(editor.text(), "bar");
+
+        apply_vim_action(VimAction::Undo, &mut editor);
+        assert_eq!(editor.text(), "foo bar");
+
+        apply_vim_action(VimAction::Redo, &mut editor);
+        assert_eq!(editor.text(), "bar");
     }
 
     #[test]

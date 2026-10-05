@@ -46,7 +46,7 @@ pub fn calculate_layout(
         .constraints([
             Constraint::Min(3),
             Constraint::Length(editor_rows),
-            Constraint::Length(2),
+            Constraint::Length(1),
         ])
         .split(area);
     let output_area = rows[0];
@@ -214,55 +214,36 @@ fn render_editor(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let status = state.output.status;
-    let mode = match state.editor.vim_mode {
-        VimMode::Insert => "INSERT",
-        VimMode::Normal => "NORMAL",
+    let errors_hint = if current_stderr_nonempty(state) {
+        " · Ctrl-E errors"
+    } else {
+        ""
     };
 
-    let mut status_line = vec![
-        Span::styled(mode, Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw("  "),
-        Span::styled(
-            status_label(status),
-            Style::default().fg(status_color(status)),
-        ),
-    ];
-    if hidden_stderr(state) {
-        status_line.extend([
-            Span::raw("  "),
-            Span::styled("! stderr", Style::default().fg(Color::DarkGray)),
-        ]);
-    }
-
-    let hints = state.status_message.as_deref().unwrap_or_else(|| {
-        if state.editor.vim_mode == VimMode::Insert {
-            "Enter execute · Esc normal · Ctrl-Y copy output · Alt-Y copy command · Ctrl-E errors"
-        } else if status == EvaluationStatus::Stale {
-            "q keep · i insert · Alt-R restore last success · Ctrl-Y copy output · Ctrl-E errors"
-        } else {
-            "q keep · i insert · Ctrl-Y copy output · Alt-Y copy command · Ctrl-E errors"
-        }
-    });
+    let default_hints = if state.editor.vim_mode == VimMode::Insert {
+        format!("Ctrl-Y copy output · Alt-Y copy command{errors_hint}")
+    } else if status == EvaluationStatus::Stale {
+        format!("Alt-U restore last success · Ctrl-Y copy output{errors_hint}")
+    } else {
+        format!("Ctrl-Y copy output · Alt-Y copy command{errors_hint}")
+    };
+    let hints = state.status_message.as_deref().unwrap_or(&default_hints);
     let hints_style = if state.status_message.is_some() {
         Style::default().fg(Color::Cyan)
     } else {
         Style::default().fg(Color::DarkGray)
     };
 
-    let footer = Paragraph::new(vec![
-        Line::from(status_line),
-        Line::styled(hints, hints_style),
-    ]);
+    let footer = Paragraph::new(Line::styled(hints, hints_style));
     frame.render_widget(footer, area);
 }
 
-fn hidden_stderr(state: &AppState) -> bool {
-    !state.output.error_pane_visible
-        && state
-            .output
-            .current_attempt
-            .as_ref()
-            .is_some_and(|result| !result.stderr.is_empty())
+fn current_stderr_nonempty(state: &AppState) -> bool {
+    state
+        .output
+        .current_attempt
+        .as_ref()
+        .is_some_and(|result| !result.stderr.is_empty())
 }
 
 /// Compute the editor's horizontal scroll so that at least `LOOKAHEAD_COLUMNS`
@@ -344,17 +325,16 @@ mod tests {
     }
 
     #[test]
-    fn stderr_indicator_only_appears_for_hidden_nonempty_stderr() {
+    fn errors_hint_only_appears_for_nonempty_stderr() {
         let mut state = AppState::new();
         state.output.current_attempt = Some(result("", "failure"));
-        assert!(hidden_stderr(&state));
+        assert!(current_stderr_nonempty(&state));
 
         state.output.error_pane_visible = true;
-        assert!(!hidden_stderr(&state));
+        assert!(current_stderr_nonempty(&state));
 
-        state.output.error_pane_visible = false;
         state.output.current_attempt = Some(result("", ""));
-        assert!(!hidden_stderr(&state));
+        assert!(!current_stderr_nonempty(&state));
     }
 
     #[test]
@@ -372,7 +352,7 @@ mod tests {
         let inner = stdout_block().inner(layout.stdout);
         let preview = stdout_inner_size(area, false, 1, 5);
         assert_eq!(preview, inner);
-        assert_eq!((preview.width, preview.height), (118, 33));
+        assert_eq!((preview.width, preview.height), (118, 34));
     }
 
     #[test]
