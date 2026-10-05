@@ -206,9 +206,7 @@ impl App {
 
         self.pending_key = if self.config.input_mode == InputMode::Vim
             && self.state.editor.vim_mode == crate::keymap::VimMode::Normal
-            && ((key.code == KeyCode::Char('g')
-                && !key.modifiers.ctrl
-                && !key.modifiers.alt)
+            && ((key.code == KeyCode::Char('g') && !key.modifiers.ctrl && !key.modifiers.alt)
                 || self
                     .config
                     .keymap
@@ -343,7 +341,9 @@ impl App {
 
     fn receive_results(&mut self) {
         while let Ok(result) = self.result_rx.try_recv() {
-            if result.generation == self.current_generation {
+            if result.generation == self.current_generation
+                && result.command == self.state.editor.text()
+            {
                 self.state
                     .output
                     .apply_result(result, self.current_generation);

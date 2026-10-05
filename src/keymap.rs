@@ -413,10 +413,7 @@ impl Keymap {
                     keymap.vim.normal_sequences.insert((g, g), action);
                 }
                 KeyOrSequence::Double(first, second) if mode == VimMode::Normal => {
-                    keymap
-                        .vim
-                        .normal_sequences
-                        .insert((first, second), action);
+                    keymap.vim.normal_sequences.insert((first, second), action);
                 }
                 KeyOrSequence::DoubleG | KeyOrSequence::Double(_, _) => {
                     anyhow::bail!("key sequences are only supported in Vim normal mode");
@@ -926,8 +923,14 @@ mod tests {
             km.normal_sequences.get(&(d, d)),
             Some(&VimAction::DeleteWholeLine)
         );
-        assert_eq!(km.normal.get(&"C".parse().unwrap()), Some(&VimAction::ChangeToLineEnd));
-        assert_eq!(km.normal.get(&"D".parse().unwrap()), Some(&VimAction::DeleteToLineEnd));
+        assert_eq!(
+            km.normal.get(&"C".parse().unwrap()),
+            Some(&VimAction::ChangeToLineEnd)
+        );
+        assert_eq!(
+            km.normal.get(&"D".parse().unwrap()),
+            Some(&VimAction::DeleteToLineEnd)
+        );
     }
 
     // --- Override merging ---

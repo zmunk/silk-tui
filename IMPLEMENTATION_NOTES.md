@@ -373,14 +373,14 @@ Silk is a Rust TUI for editing shell commands with live preview. Stack: `ratatui
 
 ### `protocol.rs`
 
-- [ ] Parse `--query "$BUFFER"` argument
-- [ ] On exit, write **only** the command to stdout (for exit codes 0 and 10)
-- [ ] UI/debug output must **never** pollute stdout — use stderr for all diagnostics
-- [ ] Exit codes:
+- [x] Parse `--query "$BUFFER"` argument
+- [x] On exit, write **only** the command to stdout (for exit codes 0 and 10)
+- [x] UI/debug output must **never** pollute stdout — use stderr for all diagnostics
+- [x] Exit codes:
   - `0` — keep edited command
   - `10` — execute edited command
   - `130` — cancel, restore original buffer
-- [ ] Terminal state always restored on exit (use RAII guard or `Drop`)
+- [x] Terminal state always restored on exit (use RAII guard or `Drop`)
 
 > **Testing note:** All `cargo test` / `cargo build` / `cargo check` commands must be
 > relayed via `agentq push` — they cannot run in the sandbox. Write test code directly,
@@ -390,19 +390,19 @@ Silk is a Rust TUI for editing shell commands with live preview. Stack: `ratatui
 
 ## Phase 11 — Vim Action Tests (§31)
 
-- [ ] Write unit tests for Vim actions
-- [ ] `cargo test` — verify all Vim action tests pass  ← **relay via agentq**
+- [x] Write unit tests for Vim actions
+- [x] `cargo test` — verify all Vim action tests pass  ← **relay via agentq**
 
-- [ ] Esc → Normal mode
-- [ ] i → Insert mode
-- [ ] a / A / I behaviors correct
-- [ ] h / l cursor movement
-- [ ] w / b / e word movement
-- [ ] Configurable binding test:
+- [x] Esc → Normal mode
+- [x] i → Insert mode
+- [x] a / A / I behaviors correct
+- [x] h / l cursor movement
+- [x] w / b / e word movement
+- [x] Configurable binding test:
   - Set `end_of_line = ";"`
   - Verify `;` invokes `EndOfLine`
   - Verify `$` no longer invokes `EndOfLine`
-- [ ] Extensibility test:
+- [x] Extensibility test:
   - Add a test `VimAction` variant
   - Verify: config name → keymap → action → editor behavior
   - Confirm no changes needed to config struct
@@ -411,32 +411,32 @@ Silk is a Rust TUI for editing shell commands with live preview. Stack: `ratatui
 
 ## Phase 12 — Cancellation Tests (§31)
 
-- [ ] First Ctrl-C shows warning message
-- [ ] Second Ctrl-C cancels (exit 130)
-- [ ] Typing any other key after first Ctrl-C clears pending cancellation
-- [ ] Cancellation restores terminal state
-- [ ] `cargo test` — verify cancellation tests pass  ← **relay via agentq**
+- [x] First Ctrl-C shows warning message
+- [x] Second Ctrl-C cancels (exit 130)
+- [x] Typing any other key after first Ctrl-C clears pending cancellation
+- [x] Cancellation restores terminal state
+- [x] `cargo test` — verify cancellation tests pass  ← **relay via agentq**
 
 ---
 
 ## Phase 13 — Integration & Polish
 
-- [ ] Startup feels immediate (no perceptible delay)
-- [ ] Current shell buffer opens in editor (via `--query`)
-- [ ] Vim mode enabled by default
-- [ ] Regular input mode configurable via `input_mode = "regular"`
-- [ ] All default keybindings work without config file
-- [ ] User config merges over defaults (partial overrides)
-- [ ] `Ctrl-E` toggles error pane, stays open until explicitly closed
-- [ ] Output copying works (Ctrl-Y)
-- [ ] Command copying works (Alt-Y)
-- [ ] Scroll bindings work (Ctrl-D, Ctrl-U, gg, G)
-- [ ] `j` / `k` are editor-only, not pane scrollers
-- [ ] Terminal state restored on all exit paths (panic hook too)
-- [ ] No fzf in dependency tree
-- [ ] No daemon or background process
-- [ ] `cargo build --release` — verify release build  ← **relay via agentq**
-- [ ] Manual smoke test: `silk --query "echo hello"`  ← **relay via agentq**
+- [x] Startup feels immediate (no perceptible delay)
+- [x] Current shell buffer opens in editor (via `--query`)
+- [x] Vim mode enabled by default
+- [x] Regular input mode configurable via `input_mode = "regular"`
+- [x] All default keybindings work without config file
+- [x] User config merges over defaults (partial overrides)
+- [x] `Ctrl-E` toggles error pane, stays open until explicitly closed
+- [x] Output copying works (Ctrl-Y)
+- [x] Command copying works (Alt-Y)
+- [x] Scroll bindings work (Ctrl-D, Ctrl-U, gg, G)
+- [x] `j` / `k` are editor-only, not pane scrollers
+- [x] Terminal state restored on all exit paths (panic hook too)
+- [x] No fzf in dependency tree
+- [x] No daemon or background process
+- [x] `cargo build --release` — verify release build  ← **relay via agentq**
+- [x] Manual smoke test: `silk --query "echo hello"`  ← **relay via agentq**
 
 ---
 

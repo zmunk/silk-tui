@@ -99,12 +99,6 @@ impl OutputState {
         self.status = EvaluationStatus::Running;
     }
 
-    /// Mark evaluation as empty (command cleared).
-    pub fn mark_empty(&mut self) {
-        self.current_attempt = None;
-        self.status = EvaluationStatus::Empty;
-    }
-
     /// Determine which pane scrolling targets (§14).
     /// Returns true if scrolling should operate on the error pane.
     pub fn scroll_target_is_error(&self) -> bool {
@@ -118,10 +112,7 @@ impl OutputState {
     // --- Scroll helpers ---
 
     pub fn scroll_output_half_page_down(&mut self, page_height: usize, max: usize) {
-        self.output_scroll = self
-            .output_scroll
-            .saturating_add(page_height / 2)
-            .min(max);
+        self.output_scroll = self.output_scroll.saturating_add(page_height / 2).min(max);
     }
 
     pub fn scroll_output_half_page_up(&mut self, page_height: usize) {
@@ -137,10 +128,7 @@ impl OutputState {
     }
 
     pub fn scroll_error_half_page_down(&mut self, page_height: usize, max: usize) {
-        self.error_scroll = self
-            .error_scroll
-            .saturating_add(page_height / 2)
-            .min(max);
+        self.error_scroll = self.error_scroll.saturating_add(page_height / 2).min(max);
     }
 
     pub fn scroll_error_half_page_up(&mut self, page_height: usize) {
@@ -196,12 +184,6 @@ impl Default for OutputState {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Apply a result to output state. Kept as a free function for callers that
-/// treat state transitions separately from state storage.
-pub fn apply_result(state: &mut OutputState, result: EvaluationResult, current_gen: u64) -> bool {
-    state.apply_result(result, current_gen)
 }
 
 #[cfg(test)]

@@ -8,18 +8,8 @@ use tui_textarea::{CursorMove, TextArea};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditorEffect {
     None,
-    /// Execute the current command (Enter).
-    Execute,
     /// Return the command without executing (q).
     KeepCommand,
-    /// Copy current output to clipboard.
-    CopyOutput,
-    /// Copy current command to clipboard.
-    CopyCommand,
-    /// Toggle the error pane.
-    ToggleErrorPane,
-    /// Cancel warning / cancel.
-    Cancel,
 }
 
 /// Editor state: text buffer, cursor, Vim mode, undo/redo (§4, §16, §20).
@@ -48,10 +38,6 @@ impl EditorState {
         self.textarea.lines().join("\n")
     }
 
-    /// Returns true if the text buffer is empty.
-    pub fn is_empty(&self) -> bool {
-        self.textarea.lines().iter().all(|l| l.is_empty())
-    }
 }
 
 impl Default for EditorState {

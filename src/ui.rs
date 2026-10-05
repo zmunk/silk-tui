@@ -77,9 +77,15 @@ fn render_stderr(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         .as_ref()
         .map(|result| result.stderr.as_str())
         .unwrap_or_default();
+    let title = state
+        .output
+        .current_attempt
+        .as_ref()
+        .and_then(|result| result.exit_code)
+        .map_or_else(|| " ERRORS ".to_owned(), |code| format!(" ERRORS · EXIT {code} "));
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" ERRORS ")
+        .title(title)
         .border_style(Style::default().fg(Color::DarkGray));
     let paragraph = Paragraph::new(stderr)
         .block(block)

@@ -39,10 +39,6 @@ impl Evaluator {
         self.generation.fetch_add(1, Ordering::SeqCst) + 1
     }
 
-    pub fn latest_generation(&self) -> u64 {
-        self.generation.load(Ordering::SeqCst)
-    }
-
     /// Syntax-check and evaluate `command` without blocking the caller.
     ///
     /// Starting a newer generation cancels the currently running shell. A
@@ -405,12 +401,7 @@ mod tests {
         let evaluator = Evaluator::new("bash", environment);
         let generation = evaluator.next_generation();
         let (tx, rx) = mpsc::channel();
-        evaluator.evaluate(
-            "printf %s \"$SILK_EVALUATOR_TEST\"",
-            generation,
-            tx,
-            None,
-        );
+        evaluator.evaluate("printf %s \"$SILK_EVALUATOR_TEST\"", generation, tx, None);
         let result = rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(result.stdout, "configured");
     }

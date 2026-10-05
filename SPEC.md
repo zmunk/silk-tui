@@ -196,6 +196,15 @@ MY_CUSTOM_VARIABLE = "value"
 
 Configured variables are merged over the environment inherited by Silk.
 
+Preview processes also receive `COLUMNS` and `LINES` matching the usable interior
+of the stdout pane. Commands that honor these variables should therefore format
+output to the pane rather than the full terminal. Evaluation is rerun after a
+terminal resize or an error-pane toggle so these values remain current.
+
+A pane-sized pseudo-terminal is not required. Programs that exclusively inspect
+TTY ioctl dimensions instead of `COLUMNS` and `LINES` may still observe the host
+terminal dimensions.
+
 ---
 
 ## 9. Live Evaluation
@@ -329,6 +338,12 @@ or:
 
 Do not make it visually dominant.
 
+When an exit code is available, the error-pane title should include it, for example:
+
+```text
+ERRORS · EXIT 1
+```
+
 ---
 
 ## 13. Status Styling
@@ -371,6 +386,9 @@ G         bottom
 `j` and `k` do not scroll output.
 
 They remain part of editor/Vim behavior.
+
+Scroll offsets must be clamped to the available content. Scrolling down when the
+active pane does not overflow its viewport is a no-op and must not hide output.
 
 ---
 
@@ -432,6 +450,10 @@ enum VimAction {
     AppendAtEnd,
 
     DeleteChar,
+    ChangeWholeLine,
+    ChangeToLineEnd,
+    DeleteWholeLine,
+    DeleteToLineEnd,
 
     Undo,
     Redo,
@@ -531,6 +553,10 @@ append_insert_mode = "a"
 insert_at_beginning = "I"
 append_at_end = "A"
 delete_char = "x"
+change_whole_line = "cc"
+change_to_line_end = "C"
+delete_whole_line = "dd"
+delete_to_line_end = "D"
 undo = "u"
 redo = "ctrl-r"
 keep_command = "q"
@@ -576,7 +602,13 @@ ctrl-u
 ctrl-y
 ctrl-e
 alt-y
+cc
+dd
 ```
+
+Vim Normal-mode configuration must support two-key character sequences such as
+`cc` and `dd`. Sequence resolution belongs in the keymap and must produce the
+same semantic `VimAction` values as single-key bindings.
 
 Represent parsed keys using a normalized internal type such as:
 
@@ -629,6 +661,10 @@ Default editing:
 
 ```text
 x       delete character
+cc      clear the whole line and enter Insert mode
+C       delete from the cursor through the end of the line and enter Insert mode
+dd      clear the whole line and remain in Normal mode
+D       delete from the cursor through the end of the line and remain in Normal mode
 u       undo
 Ctrl-R  redo
 ```
@@ -759,11 +795,9 @@ Any meaningful input after the first Ctrl-C clears the pending cancellation stat
 
 `Esc` must never close Silk.
 
-In Vim mode:
-
-```text
-Insert → Normal
-```
+In Vim mode, `Esc` transitions from Insert to Normal mode. The Normal-mode block
+cursor moves one character left from the insertion point, matching Vim. It does
+not move when the insertion point is already at the beginning of the line.
 
 In Normal mode, it may clear pending Vim state.
 
@@ -863,11 +897,15 @@ Configuration parsing should remain isolated from runtime behavior.
 
 ## 29. Shell Integration Contract
 
-Silk accepts the current shell buffer:
+Silk requires the current shell buffer through `--query`. Both forms are supported:
 
 ```sh
 silk --query "$BUFFER"
+silk --query="$BUFFER"
 ```
+
+An empty query value is valid. A missing value, duplicate `--query`, or unknown
+argument is an unexpected Silk failure.
 
 Exit meanings:
 
@@ -946,6 +984,7 @@ Ctrl-U
 gg
 G
 output/error offsets remain independent
+non-overflowing content cannot be scrolled out of view
 ```
 
 ### Vim actions
@@ -956,6 +995,15 @@ i → Insert
 a / A / I
 h / l
 w / b / e
+cc / C / dd / D behaviors and resulting modes
+Esc moves left unless already at line start
+```
+
+### evaluation dimensions
+
+```text
+preview receives pane-sized COLUMNS and LINES
+resizing or toggling the error pane refreshes those dimensions
 ```
 
 ### configurable Vim bindings
@@ -1022,8 +1070,10 @@ Silk is ready when:
 * failure preserves last successful stdout;
 * Ctrl-E toggles the stderr split;
 * hidden stderr is indicated unobtrusively;
-* output/error scrolling supports Ctrl-D, Ctrl-U, gg, and G;
+* output/error scrolling supports Ctrl-D, Ctrl-U, gg, and G without scrolling past content;
 * `j` and `k` remain editor keys rather than pane-scrolling keys;
+* Vim line editing supports cc, C, dd, and D;
+* preview commands receive the output pane dimensions through COLUMNS and LINES;
 * current output can be copied;
 * current command can be copied;
 * Enter returns and executes the command through the shell;
