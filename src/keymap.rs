@@ -95,6 +95,9 @@ pub enum VimAction {
     DeleteWord,
     DeleteWordBig,
     OpenLineBelow,
+    OpenLineAbove,
+    JoinLines,
+    ChangeChar,
     Undo,
     Redo,
     KeepCommand,
@@ -190,6 +193,9 @@ impl VimKeymap {
 
         // Open a new line below and enter Insert mode.
         normal.insert(ch('o'), OpenLineBelow);
+        normal.insert(ch('O'), OpenLineAbove);
+        normal.insert(ch('J'), JoinLines);
+        normal.insert(ch('s'), ChangeChar);
 
         let mut normal_sequences = HashMap::new();
         normal_sequences.insert((ch('d'), ch('d')), DeleteWholeLine);

@@ -53,6 +53,7 @@ pub struct AppState {
     pub output: OutputState,
     /// Temporary controller-provided feedback (for example, `copied` or a clipboard error).
     pub status_message: Option<String>,
+    pub animation_started: Instant,
 }
 
 impl AppState {
@@ -61,6 +62,7 @@ impl AppState {
             editor: EditorState::new(),
             output: OutputState::new(),
             status_message: None,
+            animation_started: Instant::now(),
         }
     }
 }
@@ -378,10 +380,16 @@ impl App {
     }
 
     /// Apply the `c` operator paired with a plain (non-find) motion key:
-    /// `cw`, `cW`, `ce`, `c0`, `c$`, `cb`.
+    /// `cl`, `cw`, `cW`, `ce`, `c0`, `c$`, `cb`.
     fn apply_change_motion_key(&mut self, key: KeyChord) {
         use crate::editor as ed;
+        if key.modifiers.ctrl || key.modifiers.alt {
+            return;
+        }
         match key.code {
+            KeyCode::Char('l') => {
+                apply_vim_action(VimAction::ChangeChar, &mut self.state.editor);
+            }
             KeyCode::Char('w') => ed::change_word(&mut self.state.editor),
             KeyCode::Char('W') => ed::change_word_big(&mut self.state.editor),
             KeyCode::Char('e') => ed::change_to_word_end(&mut self.state.editor),
@@ -880,6 +888,28 @@ mod tests {
 
         assert_eq!(app.state.editor.text(), "");
         assert_eq!(app.state.editor.vim_mode, crate::keymap::VimMode::Normal);
+    }
+
+    #[test]
+    fn normal_mode_new_editing_keys_are_wired() {
+        for (text, keys, expected, mode) in [
+            ("first\nsecond", "O", "\nfirst\nsecond", crate::keymap::VimMode::Insert),
+            ("first\nsecond", "J", "first second", crate::keymap::VimMode::Normal),
+            ("cat", "cl", "at", crate::keymap::VimMode::Insert),
+            ("first\n\nthird", "jdd", "first\nthird", crate::keymap::VimMode::Normal),
+        ] {
+            let mut app = app();
+            app.state.editor.set_text(text);
+            app.state.editor.vim_mode = crate::keymap::VimMode::Normal;
+            for character in keys.chars() {
+                app.handle_key(KeyEvent::new(
+                    crossterm::event::KeyCode::Char(character),
+                    crossterm::event::KeyModifiers::NONE,
+                )).unwrap();
+            }
+            assert_eq!(app.state.editor.text(), expected);
+            assert_eq!(app.state.editor.vim_mode, mode);
+        }
     }
 
     #[test]

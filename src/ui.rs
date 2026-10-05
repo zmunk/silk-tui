@@ -135,7 +135,7 @@ fn render_stdout(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(format!(" OUTPUT · {} ", status_label(status)))
+        .title(output_title(status, state.animation_started.elapsed().as_millis()))
         .border_style(Style::default().fg(status_color(status)));
     let paragraph = Paragraph::new(text)
         .style(text_style)
@@ -192,9 +192,11 @@ fn render_editor(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         .map(|line| line.chars().count())
         .unwrap_or(0);
     let horizontal_scroll = editor_horizontal_scroll(cursor_column, line_len, inner_width);
-    // Stateless, like the horizontal scroll: pin the cursor's row to the last
-    // visible row once the buffer has more lines than fit in the pane.
-    let vertical_scroll = cursor_row.saturating_sub(inner_height.saturating_sub(1));
+    let vertical_scroll = editor_vertical_scroll(
+        cursor_row,
+        state.editor.textarea.lines().len(),
+        inner_height,
+    );
     let editor = Paragraph::new(state.editor.text())
         .block(block)
         .scroll((to_u16(vertical_scroll), to_u16(horizontal_scroll)));
@@ -255,12 +257,18 @@ fn editor_horizontal_scroll(cursor_column: usize, line_len: usize, inner_width: 
     visible_target.saturating_sub(inner_width.saturating_sub(1))
 }
 
-fn status_label(status: EvaluationStatus) -> &'static str {
-    match status {
-        EvaluationStatus::Empty => "EMPTY",
-        EvaluationStatus::Running => "RUNNING",
-        EvaluationStatus::Current => "CURRENT",
-        EvaluationStatus::Stale => "STALE",
+fn editor_vertical_scroll(cursor_row: usize, line_count: usize, inner_height: usize) -> usize {
+    let lookahead = usize::from(cursor_row + 1 < line_count && inner_height > 1);
+    (cursor_row + lookahead).saturating_sub(inner_height.saturating_sub(1))
+}
+
+fn output_title(status: EvaluationStatus, elapsed_ms: u128) -> String {
+    const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    if status == EvaluationStatus::Running {
+        let spinner = SPINNER[((elapsed_ms / 80) % SPINNER.len() as u128) as usize];
+        format!(" OUTPUT {spinner} ")
+    } else {
+        " OUTPUT ".to_owned()
     }
 }
 
@@ -322,6 +330,24 @@ mod tests {
             editor_horizontal_scroll(line_len - 1, line_len, 10),
             line_len + 1 - 9
         );
+    }
+
+    #[test]
+    fn vertical_scroll_shows_a_line_below_the_cursor() {
+        assert_eq!(editor_vertical_scroll(4, 10, 5), 1);
+        assert_eq!(editor_vertical_scroll(8, 10, 5), 5);
+        assert_eq!(editor_vertical_scroll(9, 10, 5), 5);
+        assert_eq!(editor_vertical_scroll(0, 10, 5), 0);
+        assert_eq!(editor_vertical_scroll(4, 10, 1), 4);
+    }
+
+    #[test]
+    fn output_header_only_animates_while_running() {
+        for status in [EvaluationStatus::Empty, EvaluationStatus::Current, EvaluationStatus::Stale] {
+            assert_eq!(output_title(status, 0), " OUTPUT ");
+            assert_eq!(output_title(status, 80), " OUTPUT ");
+        }
+        assert_ne!(output_title(EvaluationStatus::Running, 0), output_title(EvaluationStatus::Running, 80));
     }
 
     #[test]

@@ -153,6 +153,19 @@ pub fn apply_vim_action(action: VimAction, editor: &mut EditorState) -> EditorEf
             editor.textarea.insert_newline();
             editor.vim_mode = VimMode::Insert;
         }
+        OpenLineAbove => {
+            editor.push_undo();
+            editor.textarea.move_cursor(CursorMove::Head);
+            editor.textarea.insert_newline();
+            editor.textarea.move_cursor(CursorMove::Up);
+            editor.vim_mode = VimMode::Insert;
+        }
+        JoinLines => join_lines(editor),
+        ChangeChar => {
+            let (row, column) = editor.textarea.cursor();
+            let end = (column + 1).min(editor.textarea.lines()[row].chars().count());
+            change_range(editor, column, end);
+        }
         DeleteChar => {
             editor.push_undo();
             editor.textarea.delete_next_char();
@@ -203,25 +216,47 @@ pub fn insert_text(editor: &mut EditorState, text: &str) {
 
 fn clear_current_line(editor: &mut EditorState) {
     editor.textarea.move_cursor(CursorMove::Head);
-    editor.textarea.delete_line_by_end();
+    let row = editor.textarea.cursor().0;
+    let length = editor.textarea.lines()[row].chars().count();
+    for _ in 0..length {
+        editor.textarea.delete_next_char();
+    }
 }
 
 /// Vim's `dd` on a multi-line buffer must remove the line itself, not just its
 /// content, so the following (or preceding, on the last line) line takes its place.
 fn delete_current_line_entirely(editor: &mut EditorState) {
-    clear_current_line(editor);
-    let line_count = editor.textarea.lines().len();
-    if line_count <= 1 {
+    let (row, _) = editor.textarea.cursor();
+    let mut lines = editor.textarea.lines().to_vec();
+    lines.remove(row);
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    let cursor_row = row.min(lines.len() - 1);
+    editor.restore(lines, (cursor_row, 0));
+}
+
+/// Vim's `J`: join the next line, stripping its indentation and adding a space.
+fn join_lines(editor: &mut EditorState) {
+    let (row, _) = editor.textarea.cursor();
+    let mut lines = editor.textarea.lines().to_vec();
+    if row + 1 >= lines.len() {
         return;
     }
-    let (row, _) = editor.textarea.cursor();
-    if row + 1 < line_count {
-        // Merge the now-empty current line with the one below it.
-        editor.textarea.delete_next_char();
-    } else {
-        // Last line: merge upward into the previous line instead.
-        editor.textarea.delete_char();
+    editor.push_undo();
+    let next = lines.remove(row + 1);
+    let next = next.trim_start();
+    let column = lines[row].chars().count();
+    if !lines[row].is_empty()
+        && !lines[row].ends_with(char::is_whitespace)
+        && !next.is_empty()
+        && !next.starts_with(')')
+    {
+        lines[row].push(' ');
     }
+    lines[row].push_str(next);
+    let column = column.min(lines[row].chars().count().saturating_sub(1));
+    editor.restore(lines, (row, column));
 }
 
 /// Move the cursor to an absolute column on its current row, using repeated
@@ -819,6 +854,59 @@ mod tests {
         let mut single = editor("only");
         apply_vim_action(VimAction::DeleteWholeLine, &mut single);
         assert_eq!(single.text(), "");
+    }
+
+    #[test]
+    fn delete_empty_line_removes_only_one_newline() {
+        for (text, row, expected) in [
+            ("\nsecond\nthird", 0, "second\nthird"),
+            ("first\n\nthird", 1, "first\nthird"),
+            ("first\n\n", 2, "first\n"),
+        ] {
+            let mut editor = editor(text);
+            for _ in 0..row {
+                editor.textarea.move_cursor(CursorMove::Down);
+            }
+            apply_vim_action(VimAction::DeleteWholeLine, &mut editor);
+            assert_eq!(editor.text(), expected);
+            editor.undo();
+            assert_eq!(editor.text(), text);
+        }
+    }
+
+    #[test]
+    fn open_line_above_preserves_current_line() {
+        let mut editor = editor("first\nsecond");
+        editor.textarea.move_cursor(CursorMove::Down);
+        apply_vim_action(VimAction::OpenLineAbove, &mut editor);
+        assert_eq!(editor.text(), "first\n\nsecond");
+        assert_eq!(editor.textarea.cursor(), (1, 0));
+        assert_eq!(editor.vim_mode, VimMode::Insert);
+        editor.undo();
+        assert_eq!(editor.text(), "first\nsecond");
+    }
+
+    #[test]
+    fn join_lines_strips_indentation_and_is_undoable() {
+        let mut editor = editor("first\n  second\nthird");
+        editor.vim_mode = VimMode::Normal;
+        apply_vim_action(VimAction::JoinLines, &mut editor);
+        assert_eq!(editor.text(), "first second\nthird");
+        assert_eq!(editor.textarea.cursor(), (0, 5));
+        assert_eq!(editor.vim_mode, VimMode::Normal);
+        editor.undo();
+        assert_eq!(editor.text(), "first\n  second\nthird");
+    }
+
+    #[test]
+    fn change_char_does_not_delete_newlines() {
+        let mut editor = editor("éx\nnext");
+        apply_vim_action(VimAction::ChangeChar, &mut editor);
+        assert_eq!(editor.text(), "x\nnext");
+        assert_eq!(editor.vim_mode, VimMode::Insert);
+        editor.textarea.move_cursor(CursorMove::End);
+        apply_vim_action(VimAction::ChangeChar, &mut editor);
+        assert_eq!(editor.text(), "x\nnext");
     }
 
     #[test]
