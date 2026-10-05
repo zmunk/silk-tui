@@ -117,8 +117,11 @@ impl OutputState {
 
     // --- Scroll helpers ---
 
-    pub fn scroll_output_half_page_down(&mut self, page_height: usize) {
-        self.output_scroll = self.output_scroll.saturating_add(page_height / 2);
+    pub fn scroll_output_half_page_down(&mut self, page_height: usize, max: usize) {
+        self.output_scroll = self
+            .output_scroll
+            .saturating_add(page_height / 2)
+            .min(max);
     }
 
     pub fn scroll_output_half_page_up(&mut self, page_height: usize) {
@@ -133,8 +136,11 @@ impl OutputState {
         self.output_scroll = max;
     }
 
-    pub fn scroll_error_half_page_down(&mut self, page_height: usize) {
-        self.error_scroll = self.error_scroll.saturating_add(page_height / 2);
+    pub fn scroll_error_half_page_down(&mut self, page_height: usize, max: usize) {
+        self.error_scroll = self
+            .error_scroll
+            .saturating_add(page_height / 2)
+            .min(max);
     }
 
     pub fn scroll_error_half_page_up(&mut self, page_height: usize) {
@@ -150,11 +156,11 @@ impl OutputState {
     }
 
     /// Scroll whichever pane is active according to §14.
-    pub fn scroll_half_page_down(&mut self, page_height: usize) {
+    pub fn scroll_half_page_down(&mut self, page_height: usize, max: usize) {
         if self.scroll_target_is_error() {
-            self.scroll_error_half_page_down(page_height);
+            self.scroll_error_half_page_down(page_height, max);
         } else {
-            self.scroll_output_half_page_down(page_height);
+            self.scroll_output_half_page_down(page_height, max);
         }
     }
 
@@ -291,7 +297,7 @@ mod tests {
     fn output_scroll_actions_move_output() {
         let mut state = OutputState::new();
 
-        state.scroll_half_page_down(20); // Ctrl-D
+        state.scroll_half_page_down(20, 40); // Ctrl-D
         assert_eq!(state.output_scroll, 10);
         state.scroll_half_page_up(8); // Ctrl-U
         assert_eq!(state.output_scroll, 6);
@@ -308,7 +314,7 @@ mod tests {
         state.error_pane_visible = true;
         state.current_attempt = Some(result(1, EvaluationKind::Failure, "", "error"));
 
-        state.scroll_half_page_down(20);
+        state.scroll_half_page_down(20, 30);
         assert_eq!(state.output_scroll, 9);
         assert_eq!(state.error_scroll, 10);
         state.scroll_half_page_up(8);
@@ -324,15 +330,25 @@ mod tests {
     fn hidden_or_empty_stderr_targets_output() {
         let mut state = OutputState::new();
         state.current_attempt = Some(result(1, EvaluationKind::Failure, "", "error"));
-        state.scroll_half_page_down(10);
+        state.scroll_half_page_down(10, 20);
         assert_eq!(state.output_scroll, 5);
         assert_eq!(state.error_scroll, 0);
 
         state.error_pane_visible = true;
         state.current_attempt = Some(result(2, EvaluationKind::Failure, "", ""));
-        state.scroll_half_page_down(10);
+        state.scroll_half_page_down(10, 20);
         assert_eq!(state.output_scroll, 10);
         assert_eq!(state.error_scroll, 0);
+    }
+
+    #[test]
+    fn downward_scrolling_is_bounded_by_content() {
+        let mut state = OutputState::new();
+        state.scroll_half_page_down(20, 0);
+        assert_eq!(state.output_scroll, 0);
+
+        state.scroll_half_page_down(20, 3);
+        assert_eq!(state.output_scroll, 3);
     }
 
     #[test]

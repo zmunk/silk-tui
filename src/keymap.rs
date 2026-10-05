@@ -45,6 +45,7 @@ pub struct KeyChord {
 pub enum KeyOrSequence {
     Single(KeyChord),
     DoubleG,
+    Double(KeyChord, KeyChord),
 }
 
 // ---------------------------------------------------------------------------
@@ -83,6 +84,10 @@ pub enum VimAction {
     AppendAtEnd,
     DeleteChar,
     DeleteToLineStart,
+    ChangeWholeLine,
+    ChangeToLineEnd,
+    DeleteWholeLine,
+    DeleteToLineEnd,
     Undo,
     Redo,
     KeepCommand,
@@ -115,6 +120,8 @@ pub enum GlobalAction {
 pub struct VimKeymap {
     /// KeyChord → VimAction for normal mode.
     pub normal: HashMap<KeyChord, VimAction>,
+    /// Two-key sequence → VimAction for normal mode.
+    pub normal_sequences: HashMap<(KeyChord, KeyChord), VimAction>,
     /// KeyChord → VimAction for insert mode.
     pub insert: HashMap<KeyChord, VimAction>,
 }
@@ -161,11 +168,17 @@ impl VimKeymap {
 
         // Editing
         normal.insert(ch('x'), DeleteChar);
+        normal.insert(ch('C'), ChangeToLineEnd);
+        normal.insert(ch('D'), DeleteToLineEnd);
         normal.insert(ch('u'), Undo);
         normal.insert(ctrl('r'), Redo);
 
         // Exit without execution
         normal.insert(ch('q'), KeepCommand);
+
+        let mut normal_sequences = HashMap::new();
+        normal_sequences.insert((ch('c'), ch('c')), ChangeWholeLine);
+        normal_sequences.insert((ch('d'), ch('d')), DeleteWholeLine);
 
         // --- Insert mode defaults (§20) ---
         let mut insert: HashMap<KeyChord, VimAction> = HashMap::new();
@@ -185,7 +198,11 @@ impl VimKeymap {
         // Note: Enter, Ctrl-C, Ctrl-E in insert mode are global actions, not Vim actions.
         // They are resolved by the global keymap first.
 
-        Self { normal, insert }
+        Self {
+            normal,
+            normal_sequences,
+            insert,
+        }
     }
 }
 
@@ -293,6 +310,27 @@ impl Keymap {
         }
     }
 
+    pub fn resolve_vim_sequence(
+        &self,
+        key: KeyChord,
+        previous: Option<KeyChord>,
+        mode: VimMode,
+    ) -> Option<VimAction> {
+        if mode != VimMode::Normal {
+            return None;
+        }
+        previous.and_then(|first| self.vim.normal_sequences.get(&(first, key)).copied())
+    }
+
+    pub fn is_vim_sequence_prefix(&self, key: KeyChord, mode: VimMode) -> bool {
+        mode == VimMode::Normal
+            && self
+                .vim
+                .normal_sequences
+                .keys()
+                .any(|(first, _)| *first == key)
+    }
+
     /// Merge user-specified global bindings over the defaults.
     ///
     /// `overrides` is action_name → key_string (e.g., "copy_output" → "ctrl-y").
@@ -324,6 +362,9 @@ impl Keymap {
                 KeyOrSequence::DoubleG => {
                     keymap.gg_action = Some(action);
                 }
+                KeyOrSequence::Double(_, _) => {
+                    anyhow::bail!("only the `gg` sequence is supported for global actions");
+                }
             }
         }
 
@@ -340,22 +381,47 @@ impl Keymap {
         mode: VimMode,
     ) -> anyhow::Result<Self> {
         let mut keymap = self.clone();
-        let target = match mode {
-            VimMode::Normal => &mut keymap.vim.normal,
-            VimMode::Insert => &mut keymap.vim.insert,
-        };
-
         for (action_name, key_str) in overrides {
             let action: VimAction = action_name
                 .parse()
                 .map_err(|e| anyhow::anyhow!("unknown Vim action '{}': {}", action_name, e))?;
-            let chord: KeyChord = key_str.parse().map_err(|e| {
+            let binding: KeyOrSequence = key_str.parse().map_err(|e| {
                 anyhow::anyhow!("invalid key '{}' for '{}': {}", key_str, action_name, e)
             })?;
 
-            // Remove any existing binding for this action in this mode
-            target.retain(|_, a| *a != action);
-            target.insert(chord, action);
+            // Remove any existing binding for this action in this mode.
+            match mode {
+                VimMode::Normal => {
+                    keymap.vim.normal.retain(|_, mapped| *mapped != action);
+                    keymap
+                        .vim
+                        .normal_sequences
+                        .retain(|_, mapped| *mapped != action);
+                }
+                VimMode::Insert => keymap.vim.insert.retain(|_, mapped| *mapped != action),
+            }
+
+            match binding {
+                KeyOrSequence::Single(chord) => {
+                    match mode {
+                        VimMode::Normal => keymap.vim.normal.insert(chord, action),
+                        VimMode::Insert => keymap.vim.insert.insert(chord, action),
+                    };
+                }
+                KeyOrSequence::DoubleG if mode == VimMode::Normal => {
+                    let g: KeyChord = "g".parse().expect("literal key is valid");
+                    keymap.vim.normal_sequences.insert((g, g), action);
+                }
+                KeyOrSequence::Double(first, second) if mode == VimMode::Normal => {
+                    keymap
+                        .vim
+                        .normal_sequences
+                        .insert((first, second), action);
+                }
+                KeyOrSequence::DoubleG | KeyOrSequence::Double(_, _) => {
+                    anyhow::bail!("key sequences are only supported in Vim normal mode");
+                }
+            }
         }
 
         Ok(keymap)
@@ -477,6 +543,12 @@ impl FromStr for KeyOrSequence {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s == "gg" {
             return Ok(KeyOrSequence::DoubleG);
+        }
+        if s.chars().count() == 2 {
+            let mut characters = s.chars();
+            let first = characters.next().expect("length checked").to_string();
+            let second = characters.next().expect("length checked").to_string();
+            return Ok(KeyOrSequence::Double(first.parse()?, second.parse()?));
         }
         s.parse::<KeyChord>().map(KeyOrSequence::Single)
     }
@@ -685,6 +757,15 @@ mod tests {
         let k: KeyOrSequence = "gg".parse().unwrap();
         assert_eq!(k, KeyOrSequence::DoubleG);
 
+        let k: KeyOrSequence = "cc".parse().unwrap();
+        assert_eq!(
+            k,
+            KeyOrSequence::Double(
+                "c".parse::<KeyChord>().unwrap(),
+                "c".parse::<KeyChord>().unwrap()
+            )
+        );
+
         let k: KeyOrSequence = "ctrl-y".parse().unwrap();
         assert_eq!(
             k,
@@ -835,6 +916,18 @@ mod tests {
             }),
             Some(&VimAction::DeleteToLineStart)
         );
+        let c: KeyChord = "c".parse().unwrap();
+        let d: KeyChord = "d".parse().unwrap();
+        assert_eq!(
+            km.normal_sequences.get(&(c, c)),
+            Some(&VimAction::ChangeWholeLine)
+        );
+        assert_eq!(
+            km.normal_sequences.get(&(d, d)),
+            Some(&VimAction::DeleteWholeLine)
+        );
+        assert_eq!(km.normal.get(&"C".parse().unwrap()), Some(&VimAction::ChangeToLineEnd));
+        assert_eq!(km.normal.get(&"D".parse().unwrap()), Some(&VimAction::DeleteToLineEnd));
     }
 
     // --- Override merging ---

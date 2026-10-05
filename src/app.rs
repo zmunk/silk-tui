@@ -6,7 +6,7 @@ use crate::editor::{EditorEffect, EditorState, apply_vim_action};
 use crate::evaluator::Evaluator;
 use crate::keymap::{GlobalAction, KeyChord, KeyCode, key_chord_from_crossterm};
 use crate::output::{EvaluationResult, OutputState};
-use crate::ui;
+use crate::{protocol, ui};
 use anyhow::Context;
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{self, Event, KeyEvent, KeyEventKind};
@@ -76,8 +76,10 @@ pub struct App {
 }
 
 impl App {
-    pub fn new() -> anyhow::Result<Self> {
-        Self::with_config(Config::load()?)
+    pub fn new(query: &str) -> anyhow::Result<Self> {
+        let mut app = Self::with_config(Config::load()?)?;
+        app.state.editor.set_text(query);
+        Ok(app)
     }
 
     fn with_config(config: Config) -> anyhow::Result<Self> {
@@ -128,8 +130,13 @@ impl App {
             if !event::poll(self.poll_timeout()).context("failed to poll terminal input")? {
                 continue;
             }
-            let Event::Key(key) = event::read().context("failed to read terminal input")? else {
-                continue;
+            let key = match event::read().context("failed to read terminal input")? {
+                Event::Key(key) => key,
+                Event::Resize(_, _) => {
+                    self.queue_evaluation(true);
+                    continue;
+                }
+                _ => continue,
             };
             if key.kind == KeyEventKind::Release {
                 continue;
@@ -178,18 +185,40 @@ impl App {
             return self.handle_global_action(action);
         }
 
+        let before = self.state.editor.text();
+        if self.config.input_mode == InputMode::Vim {
+            if let Some(action) = self.config.keymap.resolve_vim_sequence(
+                key,
+                self.pending_key,
+                self.state.editor.vim_mode,
+            ) {
+                self.pending_key = None;
+                let effect = apply_vim_action(action, &mut self.state.editor);
+                if let Some(exit) = self.handle_editor_effect(effect) {
+                    return Ok(Some(exit));
+                }
+                if self.state.editor.text() != before {
+                    self.queue_evaluation(false);
+                }
+                return Ok(None);
+            }
+        }
+
         self.pending_key = if self.config.input_mode == InputMode::Vim
             && self.state.editor.vim_mode == crate::keymap::VimMode::Normal
-            && key.code == KeyCode::Char('g')
-            && !key.modifiers.ctrl
-            && !key.modifiers.alt
+            && ((key.code == KeyCode::Char('g')
+                && !key.modifiers.ctrl
+                && !key.modifiers.alt)
+                || self
+                    .config
+                    .keymap
+                    .is_vim_sequence_prefix(key, self.state.editor.vim_mode))
         {
             Some(key)
         } else {
             None
         };
 
-        let before = self.state.editor.text();
         match self.config.input_mode {
             InputMode::Vim => {
                 if let Some(action) = self
@@ -243,6 +272,8 @@ impl App {
             }
             ToggleErrorPane => {
                 self.state.output.error_pane_visible = !self.state.output.error_pane_visible;
+                // The available stdout width changed, so rerun format-aware commands.
+                self.queue_evaluation(true);
             }
             CopyOutput => match self.clipboard.copy_output(&self.state.output) {
                 Ok(true) => self.set_message(COPIED_MESSAGE, Some(SUCCESS_MESSAGE_TIME)),
@@ -261,7 +292,8 @@ impl App {
             },
             ScrollHalfPageDown => {
                 let height = self.output_page_height();
-                self.state.output.scroll_half_page_down(height);
+                let max = self.active_scroll_max();
+                self.state.output.scroll_half_page_down(height, max);
             }
             ScrollHalfPageUp => {
                 let height = self.output_page_height();
@@ -305,6 +337,7 @@ impl App {
             &self.state.editor.text(),
             self.current_generation,
             self.result_tx.clone(),
+            self.preview_size(),
         );
     }
 
@@ -318,11 +351,26 @@ impl App {
         }
     }
 
-    fn output_page_height(&self) -> usize {
+    fn preview_size(&self) -> Option<(u16, u16)> {
         self.terminal
             .as_ref()
             .and_then(|terminal| terminal.size().ok())
-            .map_or(1, |size| usize::from(size.height.saturating_sub(7)).max(1))
+            .map(|size| {
+                let pane_width = if self.state.output.error_pane_visible {
+                    size.width.saturating_mul(70) / 100
+                } else {
+                    size.width
+                };
+                (
+                    pane_width.saturating_sub(2).max(1),
+                    size.height.saturating_sub(7).max(1),
+                )
+            })
+    }
+
+    fn output_page_height(&self) -> usize {
+        self.preview_size()
+            .map_or(1, |(_, height)| usize::from(height))
     }
 
     fn active_scroll_max(&self) -> usize {
@@ -398,24 +446,23 @@ impl App {
 
     fn start_terminal(&mut self) -> anyhow::Result<()> {
         enable_raw_mode().context("failed to enable raw mode")?;
+        protocol::terminal_started();
         let mut output = stderr();
         if let Err(error) = execute!(output, EnterAlternateScreen) {
-            let _ = disable_raw_mode();
+            protocol::emergency_restore_terminal();
             return Err(error).context("failed to enter alternate screen");
         }
         match Terminal::new(CrosstermBackend::new(output)) {
             Ok(mut terminal) => {
                 if let Err(error) = terminal.clear() {
-                    let _ = disable_raw_mode();
-                    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
+                    protocol::emergency_restore_terminal();
                     return Err(error).context("failed to clear terminal");
                 }
                 self.terminal = Some(terminal);
                 Ok(())
             }
             Err(error) => {
-                let _ = disable_raw_mode();
-                let _ = execute!(stderr(), LeaveAlternateScreen);
+                protocol::emergency_restore_terminal();
                 Err(error).context("failed to initialize terminal")
             }
         }
@@ -436,6 +483,7 @@ impl App {
         } else {
             Ok(())
         };
+        protocol::terminal_restored();
         raw_result.and(screen_result)
     }
 }
@@ -556,6 +604,72 @@ mod tests {
                 code: 130,
             })
         );
+    }
+
+    #[test]
+    fn other_input_clears_pending_cancellation() {
+        let mut app = app();
+        app.handle_global_action(GlobalAction::Cancel).unwrap();
+
+        app.handle_key(KeyEvent::new(
+            crossterm::event::KeyCode::Char('x'),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .unwrap();
+
+        assert!(!app.cancel_pending);
+        assert_ne!(app.state.status_message.as_deref(), Some(CANCEL_MESSAGE));
+        assert_eq!(app.state.editor.text(), "x");
+    }
+
+    #[test]
+    fn error_pane_only_changes_when_toggled() {
+        let mut app = app();
+        app.handle_global_action(GlobalAction::ToggleErrorPane)
+            .unwrap();
+        assert!(app.state.output.error_pane_visible);
+
+        app.state.output.current_attempt = None;
+        app.receive_results();
+        assert!(app.state.output.error_pane_visible);
+
+        app.handle_global_action(GlobalAction::ToggleErrorPane)
+            .unwrap();
+        assert!(!app.state.output.error_pane_visible);
+    }
+
+    #[test]
+    fn normal_mode_line_sequences_apply_on_second_key() {
+        let mut app = app();
+        app.state.editor.set_text("echo hello");
+        app.state.editor.vim_mode = crate::keymap::VimMode::Normal;
+
+        for character in ['d', 'd'] {
+            app.handle_key(KeyEvent::new(
+                crossterm::event::KeyCode::Char(character),
+                crossterm::event::KeyModifiers::NONE,
+            ))
+            .unwrap();
+        }
+
+        assert_eq!(app.state.editor.text(), "");
+        assert_eq!(app.state.editor.vim_mode, crate::keymap::VimMode::Normal);
+    }
+
+    #[test]
+    fn normal_j_and_k_do_not_scroll_output() {
+        let mut app = app();
+        app.state.editor.vim_mode = crate::keymap::VimMode::Normal;
+        app.state.output.output_scroll = 8;
+
+        for character in ['j', 'k'] {
+            app.handle_key(KeyEvent::new(
+                crossterm::event::KeyCode::Char(character),
+                crossterm::event::KeyModifiers::NONE,
+            ))
+            .unwrap();
+        }
+        assert_eq!(app.state.output.output_scroll, 8);
     }
 
     #[test]

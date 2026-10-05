@@ -8,14 +8,14 @@ mod output;
 mod protocol;
 mod ui;
 
-use std::io::Write;
-
 fn main() {
+    protocol::install_panic_hook();
     match run() {
         Ok(exit) => {
-            if let Some(command) = exit.command {
-                print!("{command}");
-                let _ = std::io::stdout().flush();
+            if let Err(error) = protocol::write_command(std::io::stdout(), exit.command.as_deref())
+            {
+                eprintln!("silk: failed to write command: {error}");
+                std::process::exit(1);
             }
             std::process::exit(exit.code);
         }
@@ -27,6 +27,7 @@ fn main() {
 }
 
 fn run() -> anyhow::Result<app::AppExit> {
-    let mut app = app::App::new()?;
+    let query = protocol::parse_args()?;
+    let mut app = app::App::new(&query)?;
     app.run()
 }

@@ -47,7 +47,13 @@ impl Evaluator {
     ///
     /// Starting a newer generation cancels the currently running shell. A
     /// cancelled or otherwise superseded worker does not send a result.
-    pub fn evaluate(&self, command: &str, generation: u64, tx: Sender<EvaluationResult>) {
+    pub fn evaluate(
+        &self,
+        command: &str,
+        generation: u64,
+        tx: Sender<EvaluationResult>,
+        preview_size: Option<(u16, u16)>,
+    ) {
         self.generation.fetch_max(generation, Ordering::SeqCst);
         cancel_older_child(&self.current_child, generation);
 
@@ -74,12 +80,14 @@ impl Evaluator {
                 return;
             }
 
-            let syntax = Command::new(&shell)
+            let mut syntax_command = Command::new(&shell);
+            syntax_command
                 .args(["-n", "-c", &command])
                 .envs(&env_vars)
                 .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn();
+                .stderr(Stdio::piped());
+            apply_preview_size(&mut syntax_command, preview_size);
+            let syntax = syntax_command.spawn();
 
             let syntax = match syntax {
                 Ok(child) => run_child(child, generation, &latest, &current_child),
@@ -111,12 +119,14 @@ impl Evaluator {
             }
 
             let script = execution_script(&shell);
-            let execution = Command::new(&shell)
+            let mut execution_command = Command::new(&shell);
+            execution_command
                 .args(["-c", script, "silk", &command])
                 .envs(&env_vars)
                 .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn();
+                .stderr(Stdio::piped());
+            apply_preview_size(&mut execution_command, preview_size);
+            let execution = execution_command.spawn();
 
             let execution = match execution {
                 Ok(child) => run_child(child, generation, &latest, &current_child),
@@ -251,6 +261,13 @@ fn run_child(
     })
 }
 
+fn apply_preview_size(command: &mut Command, preview_size: Option<(u16, u16)>) {
+    if let Some((columns, lines)) = preview_size {
+        command.env("COLUMNS", columns.to_string());
+        command.env("LINES", lines.to_string());
+    }
+}
+
 fn read_pipe<R: Read>(pipe: Option<R>) -> String {
     let mut bytes = Vec::new();
     if let Some(mut pipe) = pipe {
@@ -316,7 +333,7 @@ mod tests {
         let evaluator = Evaluator::new("bash", HashMap::new());
         let generation = evaluator.next_generation();
         let (tx, rx) = mpsc::channel();
-        evaluator.evaluate(command, generation, tx);
+        evaluator.evaluate(command, generation, tx, None);
         rx.recv_timeout(Duration::from_secs(5)).unwrap()
     }
 
@@ -367,13 +384,33 @@ mod tests {
     }
 
     #[test]
+    fn preview_size_is_exposed_to_commands() {
+        let evaluator = Evaluator::new("bash", HashMap::new());
+        let generation = evaluator.next_generation();
+        let (tx, rx) = mpsc::channel();
+        evaluator.evaluate(
+            "printf '%s x %s' \"$COLUMNS\" \"$LINES\"",
+            generation,
+            tx,
+            Some((80, 24)),
+        );
+        let result = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(result.stdout, "80 x 24");
+    }
+
+    #[test]
     fn configured_environment_overrides_parent() {
         let mut environment = HashMap::new();
         environment.insert("SILK_EVALUATOR_TEST".into(), "configured".into());
         let evaluator = Evaluator::new("bash", environment);
         let generation = evaluator.next_generation();
         let (tx, rx) = mpsc::channel();
-        evaluator.evaluate("printf %s \"$SILK_EVALUATOR_TEST\"", generation, tx);
+        evaluator.evaluate(
+            "printf %s \"$SILK_EVALUATOR_TEST\"",
+            generation,
+            tx,
+            None,
+        );
         let result = rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(result.stdout, "configured");
     }
