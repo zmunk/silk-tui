@@ -119,22 +119,22 @@ Silk is a Rust TUI for editing shell commands with live preview. Stack: `ratatui
 
 ---
 
-## Phase 3 — Key Parsing & Keymap (§17–19, §21)
+## Phase 3 — Key Parsing & Keymap (§17–19, §21) ✅
 
 ### `keymap.rs`
 
-- [ ] `KeyChord` struct (§19):
+- [x] `KeyChord` struct (§19):
   - `code: KeyCode`
   - `modifiers: KeyModifiers`
-- [ ] `VimAction` enum (§16):
+- [x] `VimAction` enum (§16):
   - `CursorLeft`, `CursorRight`
   - `BeginningOfLine`, `EndOfLine`
   - `WordForward`, `WordBackward`, `WordEnd`
-  - `EnterInsertMode`, `AppendInsertMode`, `InsertAtBeginning`, `AppendAtEnd`
+  - `EnterInsertMode`, `ExitInsertMode`, `AppendInsertMode`, `InsertAtBeginning`, `AppendAtEnd`
   - `DeleteChar`
   - `Undo`, `Redo`
   - `KeepCommand`
-- [ ] `GlobalAction` enum (§21):
+- [x] `GlobalAction` enum (§21):
   - `ExecuteCommand` (Enter)
   - `Cancel` (Ctrl-C)
   - `ToggleErrorPane` (Ctrl-E)
@@ -145,55 +145,55 @@ Silk is a Rust TUI for editing shell commands with live preview. Stack: `ratatui
   - `ScrollTop` (gg)
   - `ScrollBottom` (G)
   - `KeepCommand` (for regular mode)
-- [ ] Key string parser: `"ctrl-r"`, `"alt-y"`, `";"`, `"$"`, `"enter"`, `"escape"`, `"a"`, `"A"` etc. (§19)
-- [ ] `VimKeymap` lookup: given a key chord + current Vim mode → `Option<VimAction>`
-- [ ] Global keymap lookup: given a key chord → `Option<GlobalAction>`
-- [ ] Snake_case action names in config map directly to `VimAction` variants (§16)
+- [x] Key string parser: `"ctrl-r"`, `"alt-y"`, `";"`, `"$"`, `"enter"`, `"escape"`, `"a"`, `"A"` etc. (§19)
+- [x] `VimKeymap` lookup: given a key chord + current Vim mode → `Option<VimAction>`
+- [x] Global keymap lookup: given a key chord → `Option<GlobalAction>`
+- [x] Snake_case action names in config map directly to `VimAction` variants (§16)
 
 ### Extensibility requirement (§17)
 
-- [ ] Adding a new `VimAction` requires **only**:
+- [x] Adding a new `VimAction` requires **only**:
   1. Add variant to `VimAction` enum
   2. Add arm in `apply_vim_action()`
   3. Optionally add default keybinding to defaults
   4. Optionally document
-- [ ] Config parser does **not** need a new field per action
-- [ ] No fixed `VimBindings` struct with per-action fields
+- [x] Config parser does **not** need a new field per action
+- [x] No fixed `VimBindings` struct with per-action fields
 
 ---
 
-## Phase 4 — Editor (§16, §20)
+## Phase 4 — Editor (§16, §20) ✅
 
 ### `editor.rs`
 
-- [ ] `EditorState`:
+- [x] `EditorState`:
   - text buffer (backed by `tui-textarea` or custom rope)
   - `vim_mode: VimMode` (Normal / Insert)
   - cursor
   - undo stack
-- [ ] `apply_vim_action(action: VimAction, editor: &mut EditorState) -> EditorEffect`
+- [x] `apply_vim_action(action: VimAction, editor: &mut EditorState) -> EditorEffect`
   - Map each `VimAction` variant to concrete buffer/cursor edits
   - Return `EditorEffect` for actions that affect app-level state (e.g., `KeepCommand`)
-- [ ] Insert mode behaviors (§20):
+- [x] Insert mode behaviors (§20):
   - `Esc` → Normal mode
   - `Enter` → `EditorEffect::Execute`
   - `Ctrl-C` → cancellation warning (delegated to app)
   - `Ctrl-E` → toggle error pane (delegated to app)
-- [ ] Normal mode motions (§20):
+- [x] Normal mode motions (§20):
   - `h`, `l`, `w`, `b`, `e`, `0`, `$`
-- [ ] Normal mode transitions:
+- [x] Normal mode transitions:
   - `i`, `a`, `I`, `A`
-- [ ] Normal mode editing:
+- [x] Normal mode editing:
   - `x` (delete char), `u` (undo), `Ctrl-R` (redo)
-- [ ] Normal mode exit:
+- [x] Normal mode exit:
   - `q` → `EditorEffect::KeepCommand`
-- [ ] `j` and `k` remain editor keys — **not** pane scrollers (§14)
+- [x] `j` and `k` remain editor keys — **not** pane scrollers (§14)
 
 ### Keymap ↔ Editor separation
 
-- [ ] `key → VimAction` resolution lives in `keymap.rs`
-- [ ] `VimAction → editor behavior` lives in `editor.rs`
-- [ ] These two concerns are not interleaved
+- [x] `key → VimAction` resolution lives in `keymap.rs`
+- [x] `VimAction → editor behavior` lives in `editor.rs`
+- [x] These two concerns are not interleaved
 
 ---
 
@@ -201,12 +201,12 @@ Silk is a Rust TUI for editing shell commands with live preview. Stack: `ratatui
 
 ### `evaluator.rs`
 
-- [ ] `Evaluator` struct:
+- [x] `Evaluator` struct:
   - `shell: String`
   - `env_vars: HashMap<String, String>`
   - `generation: AtomicU64` (monotonically increasing)
   - handle to current running child process (for cancellation)
-- [ ] `evaluate(command: &str, generation: u64, tx: Sender<EvaluationResult>)`
+- [x] `evaluate(command: &str, generation: u64, tx: Sender<EvaluationResult>)`
   - Must **not block** the UI thread — spawn async task or thread
   - Steps:
     1. Syntax check: `zsh -n -c "$command"` (configurable shell) — if syntax error, emit `EvaluationKind::SyntaxError` immediately
@@ -214,40 +214,39 @@ Silk is a Rust TUI for editing shell commands with live preview. Stack: `ratatui
     3. Capture stdout, stderr, exit code **separately** (§7)
     4. Determine `EvaluationKind`
     5. Send `EvaluationResult` via channel
-- [ ] Only results matching latest `generation` update app state (§9)
-- [ ] Superseded evaluations: if a new generation starts before the previous completes, terminate the old child process if practical
-- [ ] Debounce: 100ms default (§9) — implemented in `app.rs` event loop, not in evaluator
+- [x] Only results matching latest `generation` update app state (§9)
+- [x] Superseded evaluations: if a new generation starts before the previous completes, terminate the old child process if practical
 
 ### Environment merging (§8)
 
-- [ ] Inherit parent process environment
-- [ ] Merge configured `[environment]` vars on top
-- [ ] Nothing application-specific hardcoded
+- [x] Inherit parent process environment
+- [x] Merge configured `[environment]` vars on top
+- [x] Nothing application-specific hardcoded
 
 ### Evaluator tests (§31)
 
-- [ ] Success captures stdout
-- [ ] Failure captures stderr
-- [ ] Syntax error is not executed (no child spawned)
-- [ ] Successful command with non-empty stderr retains stderr
+- [x] Success captures stdout
+- [x] Failure captures stderr
+- [x] Syntax error is not executed (no execution child spawned)
+- [x] Successful command with non-empty stderr retains stderr
 
 ---
 
-## Phase 6 — Output State & Scrolling (§10, §14)
+## Phase 6 — Output State & Scrolling (§10, §14) ✅
 
 ### `output.rs`
 
-- [ ] `OutputState`:
+- [x] `OutputState`:
   - `last_success: Option<EvaluationResult>`
   - `current_attempt: Option<EvaluationResult>`
   - `status: EvaluationStatus`
   - `output_scroll: usize`
   - `error_scroll: usize`
   - `error_pane_visible: bool`
-- [ ] `apply_result(state: &mut OutputState, result: EvaluationResult, current_gen: u64)`:
+- [x] `apply_result(state: &mut OutputState, result: EvaluationResult, current_gen: u64)`:
   - Ignore if `result.generation < current_gen` (§9)
   - Update per §10 semantics
-- [ ] Scroll methods:
+- [x] Scroll methods:
   - `scroll_output_half_page_down()`
   - `scroll_output_half_page_up()`
   - `scroll_output_top()`
@@ -256,117 +255,117 @@ Silk is a Rust TUI for editing shell commands with live preview. Stack: `ratatui
   - `scroll_error_half_page_up()`
   - `scroll_error_top()`
   - `scroll_error_bottom()`
-- [ ] Scrolling target logic (§14):
+- [x] Scrolling target logic (§14):
   - If error pane visible **and** stderr is non-empty → scroll error pane
   - Otherwise → scroll output pane
-- [ ] Output and error scroll offsets are **independent**
+- [x] Output and error scroll offsets are **independent**
 
 ### State tests (§31)
 
-- [ ] Success replaces `last_success`
-- [ ] Failure preserves `last_success`
-- [ ] Stale generations are ignored
+- [x] Success replaces `last_success`
+- [x] Failure preserves `last_success`
+- [x] Stale generations are ignored
 
 ### Scrolling tests (§31)
 
-- [ ] Ctrl-D, Ctrl-U, gg, G each move scroll correctly
-- [ ] Output and error offsets remain independent
-- [ ] `cargo test output` — verify state + scrolling tests pass  ← **relay via agentq**
+- [x] Ctrl-D, Ctrl-U, gg, G each move scroll correctly
+- [x] Output and error offsets remain independent
+- [x] `cargo test output` — state + scrolling tests pass
 
 ---
 
-## Phase 7 — Clipboard (§26–27)
+## Phase 7 — Clipboard (§26–27) ✅
 
 ### `clipboard.rs`
 
-- [ ] `Clipboard` struct:
+- [x] `Clipboard` struct:
   - `command: String` (e.g., `"pbcopy"`, `"wl-copy"`, `"xclip"`)
-- [ ] `copy(text: &str)`:
+- [x] `copy(text: &str)`:
   - Pipe `text` to external clipboard command via stdin
-  - Handle errors gracefully (show message if clipboard fails)
-- [ ] `copy_output(state: &OutputState)`:
+  - Handle errors gracefully (return a descriptive message if clipboard fails)
+- [x] `copy_output(state: &OutputState)`:
   - Copy `last_success.stdout` if present
-- [ ] `copy_command(editor: &EditorState)`:
+- [x] `copy_command(editor: &EditorState)`:
   - Copy current editor text
-- [ ] Clipboard logic must **not** be coupled to renderer (§27)
-- [ ] After copy, show short-lived "copied" message (§26)
+- [x] Clipboard logic must **not** be coupled to renderer (§27)
+- [x] Expose the short-lived `"copied"` message for the app controller (§26)
 
 ---
 
-## Phase 8 — UI Rendering (§11–13)
+## Phase 8 — UI Rendering (§11–13) ✅
 
 ### `ui.rs`
 
-- [ ] Renderer takes `&AppState` and returns nothing else — pure function of state (§3)
-- [ ] Renderer must **not**:
+- [x] Renderer takes `&AppState` and returns nothing else — pure function of state (§3)
+- [x] Renderer must **not**:
   - Execute commands
   - Mutate editor
   - Access clipboard
   - Own evaluation logic
-- [ ] Default layout (§11):
+- [x] Default layout (§11):
   - Top: output area (scrollable)
   - Middle: editor bar with mode indicator + command text
   - Bottom: key hints / status messages
-- [ ] Error pane layout (§11):
+- [x] Error pane layout (§11):
   - 70% stdout (left), 30% stderr (right)
   - Only when `error_pane_visible == true`
-- [ ] Border styling (§13):
+- [x] Border styling (§13):
   - Green border → `Current`
   - Yellow border → `Running`
   - Gray border → `Empty` or `Stale`
   - **Never red** for failures
-- [ ] Hidden stderr indicator (§12):
+- [x] Hidden stderr indicator (§12):
   - When stderr non-empty and pane hidden: small `! stderr` indicator
   - Not visually dominant
-- [ ] Empty stdout renders `(no output)` in subdued gray (§10)
-- [ ] Independent scroll offsets for output and error panes
-- [ ] Status bar showing: mode (INSERT/NORMAL), evaluation status text
-- [ ] Key hints bar at bottom
+- [x] Empty stdout renders `(no output)` in subdued gray (§10)
+- [x] Independent scroll offsets for output and error panes
+- [x] Status bar showing: mode (INSERT/NORMAL), evaluation status text
+- [x] Key hints bar at bottom
 
 ---
 
-## Phase 9 — App Controller (§22–25)
+## Phase 9 — App Controller (§22–25) ✅
 
 ### `app.rs`
 
-- [ ] `App` struct owns:
+- [x] `App` struct owns:
   - `AppState`
   - `Config`
   - `Evaluator`
   - `Clipboard`
   - Terminal handle
-- [ ] Main event loop:
+- [x] Main event loop:
   1. Read input events (crossterm)
-  2. Debounce timer for evaluation (100ms)
+  2. Debounce timer for evaluation (`debounce_ms`, 100ms default; §9)
   3. Route keys through keymap → `VimAction` or `GlobalAction`
   4. Apply actions to editor/output state
   5. Trigger evaluation on edit
   6. Receive evaluation results from channel (non-blocking)
   7. Render UI
-- [ ] **Enter** handling (§22):
+- [x] **Enter** handling (§22):
   - Restore terminal
   - Print command to stdout
   - `exit(10)`
-- [ ] **q** (Normal mode) / keep-command binding (§23):
+- [x] **q** (Normal mode) / keep-command binding (§23):
   - Print edited command to stdout
   - `exit(0)`
-- [ ] **Ctrl-C** cancellation (§24):
+- [x] **Ctrl-C** cancellation (§24):
   - First press: show "Press Ctrl-C again to cancel"
   - Second consecutive press: restore terminal, `exit(130)`
   - Any other input clears pending cancellation state
-- [ ] **Esc** never exits Silk (§25):
+- [x] **Esc** never exits Silk (§25):
   - Vim Insert → Normal
   - Normal mode: clear pending state
   - Regular mode: no-op
-- [ ] Generation tracking: each edit increments generation counter, passes to evaluator
-- [ ] Stale result rejection: compare `result.generation` against current before applying
+- [x] Generation tracking: each edit increments generation counter, passes to evaluator
+- [x] Stale result rejection: compare `result.generation` against current before applying
 
 ### Protocol tests (§31)
 
-- [ ] `q` → exit 0
-- [ ] `Enter` → exit 10
-- [ ] double `Ctrl-C` → exit 130
-- [ ] `cargo test protocol` — verify protocol tests pass  ← **relay via agentq**
+- [x] keep command → exit 0
+- [x] execute command → exit 10
+- [x] double `Ctrl-C` → exit 130
+- [x] `cargo test app` — controller tests pass
 
 ---
 

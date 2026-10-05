@@ -130,14 +130,12 @@ impl RawConfig {
 
         // Merge Vim normal-mode overrides
         if !self.vim_keybindings.normal.is_empty() {
-            keymap =
-                keymap.with_vim_overrides(&self.vim_keybindings.normal, VimMode::Normal)?;
+            keymap = keymap.with_vim_overrides(&self.vim_keybindings.normal, VimMode::Normal)?;
         }
 
         // Merge Vim insert-mode overrides
         if !self.vim_keybindings.insert.is_empty() {
-            keymap =
-                keymap.with_vim_overrides(&self.vim_keybindings.insert, VimMode::Insert)?;
+            keymap = keymap.with_vim_overrides(&self.vim_keybindings.insert, VimMode::Insert)?;
         }
 
         Ok(Config {
@@ -241,7 +239,12 @@ mod tests {
     fn invalid_input_mode() {
         let result = parse(r#"input_mode = "emacs""#);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("unknown input_mode"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unknown input_mode")
+        );
     }
 
     #[test]
@@ -354,7 +357,7 @@ mod tests {
         let config = parse(
             r#"
             [vim_keybindings.insert]
-            escape = "ctrl-j"
+            exit_insert_mode = "ctrl-j"
             "#,
         )
         .unwrap();
@@ -368,7 +371,7 @@ mod tests {
         };
         assert_ne!(
             config.keymap.vim.insert.get(&esc),
-            Some(&VimAction::EnterInsertMode)
+            Some(&VimAction::ExitInsertMode)
         );
 
         // New binding (ctrl-j) should be present
@@ -381,7 +384,7 @@ mod tests {
         };
         assert_eq!(
             config.keymap.vim.insert.get(&ctrl_j),
-            Some(&VimAction::EnterInsertMode)
+            Some(&VimAction::ExitInsertMode)
         );
     }
 
@@ -399,7 +402,7 @@ mod tests {
         assert_eq!(config.keymap.gg_action, None);
 
         // ctrl-t should be ScrollTop
-        use crate::keymap::{KeyChord, KeyCode, KeyModifiers, GlobalAction};
+        use crate::keymap::{GlobalAction, KeyChord, KeyCode, KeyModifiers};
         let ctrl_t = KeyChord {
             code: KeyCode::Char('t'),
             modifiers: KeyModifiers {

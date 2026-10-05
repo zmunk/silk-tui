@@ -77,10 +77,12 @@ pub enum VimAction {
     WordBackward,
     WordEnd,
     EnterInsertMode,
+    ExitInsertMode,
     AppendInsertMode,
     InsertAtBeginning,
     AppendAtEnd,
     DeleteChar,
+    DeleteToLineStart,
     Undo,
     Redo,
     KeepCommand,
@@ -168,13 +170,16 @@ impl VimKeymap {
         // --- Insert mode defaults (§20) ---
         let mut insert: HashMap<KeyChord, VimAction> = HashMap::new();
 
+        // Ctrl-U clears from the cursor to the beginning of the line.
+        insert.insert(ctrl('u'), DeleteToLineStart);
+
         // Esc → Normal mode (handled as a special transition, but still mappable)
         insert.insert(
             KeyChord {
                 code: Esc,
                 modifiers: KeyModifiers::default(),
             },
-            EnterInsertMode, // placeholder — Esc transition is handled by app controller
+            ExitInsertMode,
         );
 
         // Note: Enter, Ctrl-C, Ctrl-E in insert mode are global actions, not Vim actions.
@@ -302,9 +307,9 @@ impl Keymap {
             let action: GlobalAction = action_name
                 .parse()
                 .map_err(|e| anyhow::anyhow!("unknown global action '{}': {}", action_name, e))?;
-            let binding: KeyOrSequence = key_str
-                .parse()
-                .map_err(|e| anyhow::anyhow!("invalid key '{}' for '{}': {}", key_str, action_name, e))?;
+            let binding: KeyOrSequence = key_str.parse().map_err(|e| {
+                anyhow::anyhow!("invalid key '{}' for '{}': {}", key_str, action_name, e)
+            })?;
 
             // Remove any existing binding for this action
             keymap.globals.retain(|_, a| *a != action);
@@ -344,9 +349,9 @@ impl Keymap {
             let action: VimAction = action_name
                 .parse()
                 .map_err(|e| anyhow::anyhow!("unknown Vim action '{}': {}", action_name, e))?;
-            let chord: KeyChord = key_str
-                .parse()
-                .map_err(|e| anyhow::anyhow!("invalid key '{}' for '{}': {}", key_str, action_name, e))?;
+            let chord: KeyChord = key_str.parse().map_err(|e| {
+                anyhow::anyhow!("invalid key '{}' for '{}': {}", key_str, action_name, e)
+            })?;
 
             // Remove any existing binding for this action in this mode
             target.retain(|_, a| *a != action);
@@ -495,30 +500,25 @@ impl std::fmt::Display for ParseActionError {
 
 impl std::error::Error for ParseActionError {}
 
+/// Deserialize an action name through its Serde representation. Because the action
+/// enums use `rename_all = "snake_case"`, newly added variants automatically become
+/// available to configuration without another parser match arm.
+fn parse_action<T>(s: &str) -> Result<T, ParseActionError>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    toml::Value::String(s.to_string())
+        .try_into()
+        .map_err(|_| ParseActionError {
+            input: s.to_string(),
+        })
+}
+
 impl FromStr for VimAction {
     type Err = ParseActionError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "cursor_left" => Ok(VimAction::CursorLeft),
-            "cursor_right" => Ok(VimAction::CursorRight),
-            "beginning_of_line" => Ok(VimAction::BeginningOfLine),
-            "end_of_line" => Ok(VimAction::EndOfLine),
-            "word_forward" => Ok(VimAction::WordForward),
-            "word_backward" => Ok(VimAction::WordBackward),
-            "word_end" => Ok(VimAction::WordEnd),
-            "enter_insert_mode" => Ok(VimAction::EnterInsertMode),
-            "append_insert_mode" => Ok(VimAction::AppendInsertMode),
-            "insert_at_beginning" => Ok(VimAction::InsertAtBeginning),
-            "append_at_end" => Ok(VimAction::AppendAtEnd),
-            "delete_char" => Ok(VimAction::DeleteChar),
-            "undo" => Ok(VimAction::Undo),
-            "redo" => Ok(VimAction::Redo),
-            "keep_command" => Ok(VimAction::KeepCommand),
-            _ => Err(ParseActionError {
-                input: s.to_string(),
-            }),
-        }
+        parse_action(s)
     }
 }
 
@@ -526,21 +526,7 @@ impl FromStr for GlobalAction {
     type Err = ParseActionError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "execute_command" => Ok(GlobalAction::ExecuteCommand),
-            "cancel" => Ok(GlobalAction::Cancel),
-            "toggle_error_pane" => Ok(GlobalAction::ToggleErrorPane),
-            "copy_output" => Ok(GlobalAction::CopyOutput),
-            "copy_command" => Ok(GlobalAction::CopyCommand),
-            "scroll_half_page_down" => Ok(GlobalAction::ScrollHalfPageDown),
-            "scroll_half_page_up" => Ok(GlobalAction::ScrollHalfPageUp),
-            "scroll_top" => Ok(GlobalAction::ScrollTop),
-            "scroll_bottom" => Ok(GlobalAction::ScrollBottom),
-            "keep_command" => Ok(GlobalAction::KeepCommand),
-            _ => Err(ParseActionError {
-                input: s.to_string(),
-            }),
-        }
+        parse_action(s)
     }
 }
 
@@ -724,25 +710,68 @@ mod tests {
 
     #[test]
     fn parse_vim_action_names() {
-        assert_eq!("cursor_left".parse::<VimAction>().unwrap(), VimAction::CursorLeft);
-        assert_eq!("beginning_of_line".parse::<VimAction>().unwrap(), VimAction::BeginningOfLine);
-        assert_eq!("end_of_line".parse::<VimAction>().unwrap(), VimAction::EndOfLine);
-        assert_eq!("enter_insert_mode".parse::<VimAction>().unwrap(), VimAction::EnterInsertMode);
-        assert_eq!("delete_char".parse::<VimAction>().unwrap(), VimAction::DeleteChar);
+        assert_eq!(
+            "cursor_left".parse::<VimAction>().unwrap(),
+            VimAction::CursorLeft
+        );
+        assert_eq!(
+            "beginning_of_line".parse::<VimAction>().unwrap(),
+            VimAction::BeginningOfLine
+        );
+        assert_eq!(
+            "end_of_line".parse::<VimAction>().unwrap(),
+            VimAction::EndOfLine
+        );
+        assert_eq!(
+            "enter_insert_mode".parse::<VimAction>().unwrap(),
+            VimAction::EnterInsertMode
+        );
+        assert_eq!(
+            "exit_insert_mode".parse::<VimAction>().unwrap(),
+            VimAction::ExitInsertMode
+        );
+        assert_eq!(
+            "delete_char".parse::<VimAction>().unwrap(),
+            VimAction::DeleteChar
+        );
         assert_eq!("undo".parse::<VimAction>().unwrap(), VimAction::Undo);
         assert_eq!("redo".parse::<VimAction>().unwrap(), VimAction::Redo);
-        assert_eq!("keep_command".parse::<VimAction>().unwrap(), VimAction::KeepCommand);
+        assert_eq!(
+            "keep_command".parse::<VimAction>().unwrap(),
+            VimAction::KeepCommand
+        );
     }
 
     #[test]
     fn parse_global_action_names() {
-        assert_eq!("execute_command".parse::<GlobalAction>().unwrap(), GlobalAction::ExecuteCommand);
-        assert_eq!("cancel".parse::<GlobalAction>().unwrap(), GlobalAction::Cancel);
-        assert_eq!("toggle_error_pane".parse::<GlobalAction>().unwrap(), GlobalAction::ToggleErrorPane);
-        assert_eq!("copy_output".parse::<GlobalAction>().unwrap(), GlobalAction::CopyOutput);
-        assert_eq!("copy_command".parse::<GlobalAction>().unwrap(), GlobalAction::CopyCommand);
-        assert_eq!("scroll_top".parse::<GlobalAction>().unwrap(), GlobalAction::ScrollTop);
-        assert_eq!("scroll_bottom".parse::<GlobalAction>().unwrap(), GlobalAction::ScrollBottom);
+        assert_eq!(
+            "execute_command".parse::<GlobalAction>().unwrap(),
+            GlobalAction::ExecuteCommand
+        );
+        assert_eq!(
+            "cancel".parse::<GlobalAction>().unwrap(),
+            GlobalAction::Cancel
+        );
+        assert_eq!(
+            "toggle_error_pane".parse::<GlobalAction>().unwrap(),
+            GlobalAction::ToggleErrorPane
+        );
+        assert_eq!(
+            "copy_output".parse::<GlobalAction>().unwrap(),
+            GlobalAction::CopyOutput
+        );
+        assert_eq!(
+            "copy_command".parse::<GlobalAction>().unwrap(),
+            GlobalAction::CopyCommand
+        );
+        assert_eq!(
+            "scroll_top".parse::<GlobalAction>().unwrap(),
+            GlobalAction::ScrollTop
+        );
+        assert_eq!(
+            "scroll_bottom".parse::<GlobalAction>().unwrap(),
+            GlobalAction::ScrollBottom
+        );
     }
 
     // --- Default keymap ---
@@ -795,6 +824,16 @@ mod tests {
                 modifiers: KeyModifiers::default(),
             }),
             Some(&VimAction::DeleteChar)
+        );
+        assert_eq!(
+            km.insert.get(&KeyChord {
+                code: KeyCode::Char('u'),
+                modifiers: KeyModifiers {
+                    ctrl: true,
+                    alt: false,
+                },
+            }),
+            Some(&VimAction::DeleteToLineStart)
         );
     }
 
