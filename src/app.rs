@@ -39,6 +39,7 @@ enum NormalPending {
     Find {
         motion: FindMotion,
         change: bool,
+        delete: bool,
     },
     /// `r` pressed, awaiting the replacement character.
     Replace,
@@ -310,11 +311,17 @@ impl App {
                         }
                     }
                 }
-                NormalPending::Find { motion, change } => {
+                NormalPending::Find {
+                    motion,
+                    change,
+                    delete,
+                } => {
                     if let KeyCode::Char(ch) = key.code {
                         if !key.modifiers.ctrl && !key.modifiers.alt {
                             if change {
                                 crate::editor::change_over_find(&mut self.state.editor, motion, ch);
+                            } else if delete {
+                                crate::editor::delete_over_find(&mut self.state.editor, motion, ch);
                             } else {
                                 crate::editor::apply_find_motion(
                                     &mut self.state.editor,
@@ -332,6 +339,7 @@ impl App {
                         self.normal_pending = NormalPending::Find {
                             motion,
                             change: true,
+                            delete: false,
                         };
                     } else {
                         self.apply_change_motion_key(key);
@@ -344,6 +352,20 @@ impl App {
             return Some(None);
         }
 
+        // Keep configured `dd`/`dw` sequences in the keymap, but allow `d`
+        // followed by a character-seeking motion to await a third key.
+        if self.pending_key == Some("d".parse().expect("literal key is valid")) {
+            if let Some(motion) = find_motion_for_key(key) {
+                self.pending_key = None;
+                self.normal_pending = NormalPending::Find {
+                    motion,
+                    change: false,
+                    delete: true,
+                };
+                return Some(None);
+            }
+        }
+
         if key.modifiers.ctrl || key.modifiers.alt {
             return None;
         }
@@ -354,24 +376,28 @@ impl App {
                 self.normal_pending = NormalPending::Find {
                     motion: FindMotion::ForwardTo,
                     change: false,
+                    delete: false,
                 }
             }
             KeyCode::Char('F') => {
                 self.normal_pending = NormalPending::Find {
                     motion: FindMotion::BackwardTo,
                     change: false,
+                    delete: false,
                 }
             }
             KeyCode::Char('t') => {
                 self.normal_pending = NormalPending::Find {
                     motion: FindMotion::ForwardTill,
                     change: false,
+                    delete: false,
                 }
             }
             KeyCode::Char('T') => {
                 self.normal_pending = NormalPending::Find {
                     motion: FindMotion::BackwardTill,
                     change: false,
+                    delete: false,
                 }
             }
             _ => return None,
@@ -1010,6 +1036,51 @@ mod tests {
             .unwrap();
         assert_eq!(app.state.editor.text(), "echo good");
         assert_eq!(app.state.status_message.as_deref(), Some(RESTORED_MESSAGE));
+    }
+
+    #[test]
+    fn vim_delete_till_preserves_target_and_supports_undo() {
+        for (text, keys, expected) in [
+            ("apple' rest", "dt'", "' rest"),
+            ("a' rest", "dt'", "' rest"),
+            ("éclair' rest", "dt'", "' rest"),
+            ("apple' rest", "dtz", "apple' rest"),
+            ("apple' rest", "dt\u{1b}", "apple' rest"),
+            ("apple rest", "dw", "rest"),
+            ("apple' rest", "dd", ""),
+        ] {
+            let mut app = app();
+            app.state.editor.vim_mode = crate::keymap::VimMode::Normal;
+            app.state.editor.set_text(text);
+            for ch in keys.chars() {
+                let code = if ch == '\u{1b}' {
+                    crossterm::event::KeyCode::Esc
+                } else {
+                    crossterm::event::KeyCode::Char(ch)
+                };
+                app.handle_key(KeyEvent::new(code, crossterm::event::KeyModifiers::NONE))
+                    .unwrap();
+            }
+            assert_eq!(app.state.editor.text(), expected);
+            assert_eq!(app.state.editor.vim_mode, crate::keymap::VimMode::Normal);
+            app.state.editor.undo();
+            assert_eq!(app.state.editor.text(), text);
+        }
+    }
+
+    #[test]
+    fn ctrl_w_deletes_previous_word_in_insert_mode() {
+        let mut app = app();
+        app.state.editor.vim_mode = crate::keymap::VimMode::Insert;
+        app.state.editor.set_text("one apple");
+        app.state.editor.textarea.move_cursor(CursorMove::End);
+        app.handle_key(KeyEvent::new(
+            crossterm::event::KeyCode::Char('w'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+        assert_eq!(app.state.editor.text(), "one ");
+        assert_eq!(app.state.editor.vim_mode, crate::keymap::VimMode::Insert);
     }
 
     #[test]

@@ -94,6 +94,7 @@ pub enum VimAction {
     DeleteToLineEnd,
     DeleteWord,
     DeleteWordBig,
+    DeleteWordBackward,
     OpenLineBelow,
     OpenLineAbove,
     JoinLines,
@@ -207,6 +208,7 @@ impl VimKeymap {
 
         // Ctrl-U clears from the cursor to the beginning of the line.
         insert.insert(ctrl('u'), DeleteToLineStart);
+        insert.insert(ctrl('w'), DeleteWordBackward);
 
         // Esc → Normal mode (handled as a special transition, but still mappable)
         insert.insert(
@@ -937,6 +939,10 @@ mod tests {
                 },
             }),
             Some(&VimAction::DeleteToLineStart)
+        );
+        assert_eq!(
+            km.insert.get(&"ctrl-w".parse().unwrap()),
+            Some(&VimAction::DeleteWordBackward)
         );
         let d: KeyChord = "d".parse().unwrap();
         assert_eq!(

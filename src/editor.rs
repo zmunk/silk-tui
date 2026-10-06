@@ -194,6 +194,7 @@ pub fn apply_vim_action(action: VimAction, editor: &mut EditorState) -> EditorEf
         }
         DeleteWord => delete_word(editor),
         DeleteWordBig => delete_word_big(editor),
+        DeleteWordBackward => delete_word_backward(editor),
         Undo => editor.undo(),
         Redo => editor.redo(),
         KeepCommand => return EditorEffect::KeepCommand,
@@ -336,7 +337,7 @@ fn find_target_column(editor: &EditorState, motion: FindMotion, target: char) ->
 
     match motion {
         FindMotion::ForwardTo => (column + 1..chars.len()).find(|&i| chars[i] == target),
-        FindMotion::ForwardTill => (column + 2..chars.len())
+        FindMotion::ForwardTill => (column + 1..chars.len())
             .find(|&i| chars[i] == target)
             .map(|i| i - 1),
         FindMotion::BackwardTo => (0..column).rev().find(|&i| chars[i] == target),
@@ -427,19 +428,57 @@ fn delete_word_big(editor: &mut EditorState) {
     delete_range(editor, start_col.min(end_col), start_col.max(end_col));
 }
 
+/// Small Vim words separate keyword characters from punctuation.
+fn word_class(ch: char) -> u8 {
+    if ch.is_whitespace() {
+        0
+    } else if ch.is_alphanumeric() || ch == '_' {
+        1
+    } else {
+        2
+    }
+}
+
+/// Insert-mode Ctrl-W skips preceding whitespace, then deletes one small word.
+fn delete_word_backward(editor: &mut EditorState) {
+    let (row, column) = editor.textarea.cursor();
+    if column == 0 {
+        if row > 0 {
+            editor.push_undo();
+            editor.textarea.delete_char();
+        }
+        return;
+    }
+    let chars: Vec<char> = editor.textarea.lines()[row].chars().collect();
+    let mut start = column;
+    while start > 0 && chars[start - 1].is_whitespace() {
+        start -= 1;
+    }
+    if start > 0 {
+        let class = word_class(chars[start - 1]);
+        while start > 0 && word_class(chars[start - 1]) == class {
+            start -= 1;
+        }
+    }
+    delete_range(editor, start, column);
+}
+
 fn word_end_target_column(chars: &[char], column: usize) -> usize {
     if column >= chars.len() {
         return column;
     }
     let mut target = column;
-    if chars[target].is_whitespace() {
-        while target < chars.len() && chars[target].is_whitespace() {
-            target += 1;
-        }
-    } else if target + 1 < chars.len() {
+    if target + 1 < chars.len() {
         target += 1;
     }
-    while target + 1 < chars.len() && !chars[target + 1].is_whitespace() {
+    while target < chars.len() && chars[target].is_whitespace() {
+        target += 1;
+    }
+    if target >= chars.len() {
+        return chars.len() - 1;
+    }
+    let class = word_class(chars[target]);
+    while target + 1 < chars.len() && word_class(chars[target + 1]) == class {
         target += 1;
     }
     target
@@ -466,7 +505,12 @@ pub fn change_word(editor: &mut EditorState) {
         }
         target
     } else {
-        word_end_target_column(&chars, column) + 1
+        let class = word_class(chars[column]);
+        let mut target = column + 1;
+        while target < chars.len() && word_class(chars[target]) == class {
+            target += 1;
+        }
+        target
     };
     change_range(editor, column, end);
 }
@@ -539,6 +583,19 @@ pub fn change_over_find(editor: &mut EditorState, motion: FindMotion, target: ch
     true
 }
 
+/// Apply a Vim `d` operator paired with a find/till motion.
+pub fn delete_over_find(editor: &mut EditorState, motion: FindMotion, target: char) -> bool {
+    let (_, column) = editor.textarea.cursor();
+    let Some(found) = find_target_column(editor, motion, target) else {
+        return false;
+    };
+    match motion {
+        FindMotion::ForwardTo | FindMotion::ForwardTill => delete_range(editor, column, found + 1),
+        FindMotion::BackwardTo | FindMotion::BackwardTill => delete_range(editor, found, column),
+    }
+    true
+}
+
 /// Vim's `e`: move to the final character of the current or next word.
 fn move_to_word_end(editor: &mut EditorState) {
     let (row, column) = editor.textarea.cursor();
@@ -550,17 +607,7 @@ fn move_to_word_end(editor: &mut EditorState) {
         return;
     }
 
-    let mut target = column;
-    if chars[target].is_whitespace() {
-        while target < chars.len() && chars[target].is_whitespace() {
-            target += 1;
-        }
-    } else if target + 1 < chars.len() {
-        target += 1;
-    }
-    while target + 1 < chars.len() && !chars[target + 1].is_whitespace() {
-        target += 1;
-    }
+    let target = word_end_target_column(&chars, column);
 
     for _ in column..target {
         editor.textarea.move_cursor(CursorMove::Forward);
@@ -745,6 +792,50 @@ mod tests {
         change_word(&mut editor);
         assert_eq!(editor.text(), " bar");
         assert_eq!(editor.vim_mode, VimMode::Insert);
+    }
+
+    #[test]
+    fn change_word_preserves_punctuation_and_handles_single_char_words() {
+        for (text, expected) in [
+            ("apple'", "'"),
+            ("a'", "'"),
+            ("éclair'", "'"),
+            ("foo_bar'", "'"),
+        ] {
+            let mut editor = editor(text);
+            change_word(&mut editor);
+            assert_eq!(editor.text(), expected);
+            assert_eq!(editor.vim_mode, VimMode::Insert);
+            editor.undo();
+            assert_eq!(editor.text(), text);
+        }
+    }
+
+    #[test]
+    fn delete_word_backward_handles_words_whitespace_and_line_start() {
+        for (text, expected) in [
+            ("one apple", "one "),
+            ("one apple   ", "one "),
+            ("apple'", "apple"),
+            ("éclair", ""),
+            ("foo_bar", ""),
+            ("   ", ""),
+            ("", ""),
+        ] {
+            let mut editor = editor(text);
+            editor.textarea.move_cursor(CursorMove::End);
+            apply_vim_action(VimAction::DeleteWordBackward, &mut editor);
+            assert_eq!(editor.text(), expected);
+            assert_eq!(editor.vim_mode, VimMode::Insert);
+            editor.undo();
+            assert_eq!(editor.text(), text);
+        }
+        let mut editor = editor("one\ntwo");
+        editor.textarea.move_cursor(CursorMove::Down);
+        apply_vim_action(VimAction::DeleteWordBackward, &mut editor);
+        assert_eq!(editor.text(), "onetwo");
+        editor.undo();
+        assert_eq!(editor.text(), "one\ntwo");
     }
 
     #[test]
